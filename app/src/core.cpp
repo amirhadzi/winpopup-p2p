@@ -18,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -27,6 +28,16 @@ namespace popup {
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr size_t MaxProfileBytes = 64 * 1024 * 1024;
+constexpr uint64_t FileSizeLimit = uint64_t{2} * 1024 * 1024 * 1024;
+constexpr size_t ActiveFileLimit = 8;
+constexpr size_t TransferHistoryLimit = 128;
+constexpr std::array<uint8_t, 5> FileProtocol = {160, 'W', 'P', 'F', 1};
+constexpr auto FileHandshakeTimeout = std::chrono::seconds(10);
+constexpr auto FileControlTimeout = std::chrono::seconds(30);
+
+bool Finished(FileState state) {
+    return state == FileState::Completed || state == FileState::Cancelled || state == FileState::Failed;
+}
 
 struct Handle {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -129,6 +140,41 @@ std::string SystemError(const std::string& operation) {
     return operation + " (Windows error " + std::to_string(GetLastError()) + ").";
 }
 
+bool ReservedFileName(const std::string& name) {
+    auto stem = name.substr(0, name.find('.'));
+    while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+    for (char& c : stem) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    return stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL" || stem == "CLOCK$" ||
+        stem == "CONIN$" || stem == "CONOUT$" ||
+        (stem.size() == 4 && (stem.substr(0, 3) == "COM" || stem.substr(0, 3) == "LPT") && stem[3] >= '1' && stem[3] <= '9') ||
+        (stem.size() == 5 && (stem.substr(0, 3) == "COM" || stem.substr(0, 3) == "LPT") &&
+            static_cast<uint8_t>(stem[3]) == 0xC2 && (static_cast<uint8_t>(stem[4]) == 0xB9 ||
+            static_cast<uint8_t>(stem[4]) == 0xB2 || static_cast<uint8_t>(stem[4]) == 0xB3));
+}
+
+std::string SafeFileName(const uint8_t* bytes, size_t length) {
+    std::string name = DisplayText(bytes, std::min(length, size_t{TOX_MAX_FILENAME_LENGTH}));
+    auto slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name.erase(0, slash + 1);
+    for (char& c : name) if (static_cast<unsigned char>(c) < 32 || std::string("<>:\"|?*").find(c) != std::string::npos) c = '_';
+    // Remove Unicode directional overrides from a suggested untrusted filename.
+    for (size_t i = 0; i + 2 < name.size();) {
+        auto a = static_cast<uint8_t>(name[i]), b = static_cast<uint8_t>(name[i + 1]), c = static_cast<uint8_t>(name[i + 2]);
+        if (a == 0xE2 && ((b == 0x80 && c >= 0xAA && c <= 0xAE) || (b == 0x81 && c >= 0xA6 && c <= 0xA9))) name.replace(i, 3, "_");
+        else ++i;
+    }
+    while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
+    if (name.empty()) name = "received-file";
+    if (name.size() > 200) {
+        size_t count = 200;
+        while (count && (static_cast<uint8_t>(name[count]) & 0xC0) == 0x80) --count;
+        name.resize(count);
+    }
+    while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
+    if (ReservedFileName(name)) name.insert(0, "_");
+    return name;
+}
+
 std::string FriendAddError(Tox_Err_Friend_Add error) {
     switch (error) {
     case TOX_ERR_FRIEND_ADD_TOO_LONG: return "The invitation note is too long.";
@@ -160,13 +206,15 @@ constexpr BootstrapNode PublicNodes[] = {
 } // namespace
 
 struct Core::Impl {
-    enum class Operation { Add, Accept, Remove, Send, Rename, Retry, Bootstrap };
+    enum class Operation { Add, Accept, Remove, Send, Rename, Retry, Bootstrap, SendFile, AcceptFile, CancelFile };
     struct Command {
         Operation op;
         uint32_t contact = 0;
         std::string text;
         std::string other;
         uint16_t port = 0;
+        uint64_t token = 0;
+        std::wstring path;
     };
 
     mutable std::mutex mutex;
@@ -176,6 +224,8 @@ struct Core::Impl {
     std::deque<Command> commands;
     std::vector<Event> events;
     std::vector<Contact> contacts;
+    std::vector<FileTransfer> transfers;
+    uint64_t nextTransferToken = 1;
     std::string address;
     std::string selfName;
     std::string dhtKey;
@@ -196,8 +246,41 @@ struct Core::Impl {
     Clock::time_point lastBootstrap{};
     Clock::time_point lastSave{};
     std::string lastSaveError;
+    struct ActiveFile {
+        FileTransfer info;
+        uint32_t fileNumber = 0;
+        bool bound = false;
+        Handle handle;
+        std::filesystem::path partial;
+        bool ownsPartial = false;
+        Clock::time_point reported{};
+        std::array<uint8_t, TOX_FILE_ID_LENGTH> id{};
+        Clock::time_point deadline{};
+        bool cancelRequested = false;
+        bool controlSent = false;
+        bool wireFinished = false;
+        bool receiverDone = false;
+        ~ActiveFile() {
+            handle.Reset();
+            if (ownsPartial) DeleteFileW(partial.c_str());
+        }
+    };
+    std::map<uint64_t, std::unique_ptr<ActiveFile>> activeFiles;
+    std::map<std::pair<uint32_t, uint32_t>, uint64_t> fileNumbers;
+    struct FilePeer {
+        bool capable = false;
+        bool blocked = false;
+        bool helloReply = false;
+        Clock::time_point lastHello{};
+    };
+    std::map<uint32_t, FilePeer> filePeers;
 
     void PushLocked(Event event) {
+        if (event.type == EventType::FileProgress || event.type == EventType::FileFinished) {
+            events.erase(std::remove_if(events.begin(), events.end(), [&](const Event& old) {
+                return old.type == EventType::FileProgress && old.transfer.token == event.transfer.token;
+            }), events.end());
+        }
         // Coalesce snapshots and retransmitted invitations while the UI is busy.
         if (event.type == EventType::Contacts || event.type == EventType::Network || event.type == EventType::Request) {
             auto found = std::find_if(events.begin(), events.end(), [&](const Event& old) {
@@ -237,14 +320,71 @@ struct Core::Impl {
         try { Error(text); } catch (...) {}
     }
 
+    uint64_t NewTransferToken() {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (nextTransferToken == 0) throw std::runtime_error("The transfer token space is exhausted.");
+        return nextTransferToken++;
+    }
+
+    void PublishTransferLocked(const FileTransfer& transfer, EventType type) {
+        auto found = std::find_if(transfers.begin(), transfers.end(), [&](const FileTransfer& old) { return old.token == transfer.token; });
+        if (found == transfers.end()) transfers.push_back(transfer); else *found = transfer;
+        while (transfers.size() > TransferHistoryLimit) {
+            auto oldest = std::find_if(transfers.begin(), transfers.end(), [](const FileTransfer& old) { return Finished(old.state); });
+            if (oldest == transfers.end()) break;
+            transfers.erase(oldest);
+        }
+        Event event;
+        event.type = type;
+        event.contact = transfer.contact;
+        event.text = transfer.detail;
+        event.transfer = transfer;
+        PushLocked(std::move(event));
+    }
+
+    void PublishTransfer(ActiveFile& file, EventType type, bool force = true) {
+        const auto now = Clock::now();
+        if (!force && now - file.reported < std::chrono::milliseconds(150)) return;
+        file.reported = now;
+        std::lock_guard<std::mutex> lock(mutex);
+        PublishTransferLocked(file.info, type);
+    }
+
+    void TransferCommandStatus(uint64_t token) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto found = std::find_if(transfers.begin(), transfers.end(), [=](const FileTransfer& old) { return old.token == token; });
+        if (found != transfers.end()) {
+            auto snapshot = *found;
+            PublishTransferLocked(snapshot, Finished(snapshot.state) ? EventType::FileFinished : EventType::FileProgress);
+        } else {
+            Event event;
+            event.type = EventType::Error;
+            event.key = "file";
+            event.text = "This file transfer is no longer available.";
+            PushLocked(std::move(event));
+        }
+    }
+
     void Enqueue(Command command) {
         std::lock_guard<std::mutex> lock(mutex);
         if (!running || stopping || commands.size() >= 1024) {
+            if (command.op == Operation::SendFile) {
+                FileTransfer transfer;
+                transfer.token = command.token;
+                transfer.contact = command.contact;
+                transfer.path = command.path;
+                transfer.direction = FileDirection::Outgoing;
+                transfer.state = FileState::Failed;
+                transfer.detail = "The messenger is not ready or is busy. Please try again.";
+                PublishTransferLocked(transfer, EventType::FileFinished);
+                return;
+            }
             Event event;
             event.type = EventType::Error;
             event.contact = command.contact;
             event.text = "The messenger is not ready or is busy. Please try again.";
             if (command.op == Operation::Send) event.key = "send";
+            if (command.op == Operation::AcceptFile || command.op == Operation::CancelFile) event.key = "file";
             PushLocked(std::move(event));
             return;
         }
@@ -281,6 +421,393 @@ struct Core::Impl {
         PushLocked(std::move(event));
     }
 
+    ActiveFile* FindFile(uint32_t contact, uint32_t number, FileDirection* direction = nullptr) {
+        auto mapped = fileNumbers.find({contact, number});
+        if (mapped == fileNumbers.end()) return nullptr;
+        auto file = activeFiles.find(mapped->second);
+        if (file == activeFiles.end() || (direction && file->second->info.direction != *direction)) return nullptr;
+        return file->second.get();
+    }
+
+    void EraseFile(uint64_t token) {
+        auto found = activeFiles.find(token);
+        if (found == activeFiles.end()) return;
+        if (found->second->bound) {
+            auto mapped = fileNumbers.find({found->second->info.contact, found->second->fileNumber});
+            if (mapped != fileNumbers.end() && mapped->second == token) fileNumbers.erase(mapped);
+        }
+        activeFiles.erase(found);
+    }
+
+    bool SendFileProtocol(uint32_t contact, uint8_t operation, const uint8_t* id = nullptr) {
+        std::array<uint8_t, 6 + TOX_FILE_ID_LENGTH> packet{};
+        std::copy(FileProtocol.begin(), FileProtocol.end(), packet.begin());
+        packet[5] = operation;
+        if (id) std::copy_n(id, TOX_FILE_ID_LENGTH, packet.begin() + 6);
+        return tox_friend_send_lossless_packet(tox, contact, packet.data(), id ? packet.size() : size_t{6}, nullptr);
+    }
+
+    void FinishFile(uint64_t token, FileState state, const std::string& detail, bool notifyPeer, bool force = false) {
+        auto found = activeFiles.find(token);
+        if (found == activeFiles.end()) return;
+        auto& file = *found->second;
+        if (Finished(file.info.state)) {
+            if (force) { EraseFile(token); return; }
+            if (!notifyPeer) file.wireFinished = true;
+            return;
+        }
+        file.handle.Reset();
+        file.info.state = state;
+        file.info.detail = detail;
+        if (file.ownsPartial) {
+            if (DeleteFileW(file.partial.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) file.ownsPartial = false;
+            else file.info.detail += " The partial file could not be removed: close other applications and delete the .winpopup-part file manually.";
+        }
+        PublishTransfer(file, EventType::FileFinished);
+        if (!file.bound || force) { EraseFile(token); return; }
+        file.deadline = Clock::now() + FileControlTimeout;
+        file.cancelRequested = notifyPeer;
+        file.wireFinished = !notifyPeer;
+        // Only the receiver emits native CANCEL. Outgoing slots cannot be reused
+        // until its ordered Done(file-ID) fence drains all old receiver controls.
+        // Retaining an app record alone is insufficient: Tox can free a sender
+        // slot automatically after the last data packet is transport-acknowledged.
+    }
+
+    void StopFilesForContact(uint32_t contact, const std::string& reason, bool notifyPeer) {
+        std::vector<uint64_t> tokens;
+        for (const auto& item : activeFiles) if (item.second->info.contact == contact) tokens.push_back(item.first);
+        for (auto token : tokens) FinishFile(token, FileState::Failed, reason, notifyPeer, true);
+        filePeers.erase(contact);
+    }
+
+    void StopAllFiles(const std::string& reason) {
+        while (!activeFiles.empty()) FinishFile(activeFiles.begin()->first, FileState::Cancelled, reason, false, true);
+        filePeers.clear();
+    }
+
+    void FileProtocolPacket(uint32_t contact, const uint8_t* data, size_t length) {
+        if (length < 6 || !std::equal(FileProtocol.begin(), FileProtocol.end(), data)) return;
+        auto& peer = filePeers[contact];
+        if ((data[5] == 1 || data[5] == 2) && length == 6) {
+            peer.capable = true;
+            if (data[5] == 1) peer.helloReply = true;
+            return;
+        }
+        if (!peer.capable || length != 6 + TOX_FILE_ID_LENGTH) return;
+        if (data[5] == 3) {
+            // An old ID can never cancel a newly recycled numeric file slot.
+            for (const auto& item : activeFiles) {
+                auto& file = *item.second;
+                if (file.info.contact == contact && file.info.direction == FileDirection::Incoming &&
+                    std::equal(file.id.begin(), file.id.end(), data + 6)) {
+                    if (!Finished(file.info.state)) FinishFile(item.first, FileState::Cancelled, "The other person cancelled the transfer.", true);
+                    return;
+                }
+            }
+            // Its original Done was already sent, or this is an irrelevant ID.
+            // A best-effort duplicate Done is harmless; never send native CANCEL.
+            SendFileProtocol(contact, 4, data + 6);
+        } else if (data[5] == 4) {
+            for (const auto& item : activeFiles) {
+                auto& file = *item.second;
+                if (file.info.contact == contact && file.info.direction == FileDirection::Outgoing &&
+                    std::equal(file.id.begin(), file.id.end(), data + 6)) {
+                    file.receiverDone = true;
+                    return;
+                }
+            }
+        }
+    }
+
+    void PumpFiles() {
+        const auto now = Clock::now();
+        for (auto& item : filePeers) {
+            auto& peer = item.second;
+            if (peer.helloReply && SendFileProtocol(item.first, 2)) peer.helloReply = false;
+        }
+        std::vector<uint64_t> erase;
+        for (auto& item : activeFiles) {
+            auto& file = *item.second;
+            if (!Finished(file.info.state) || !file.bound) continue;
+            auto& peer = filePeers[file.info.contact];
+            if (file.info.direction == FileDirection::Incoming) {
+                if (!file.wireFinished) {
+                    Tox_Err_File_Control error;
+                    if (tox_file_control(tox, file.info.contact, file.fileNumber, TOX_FILE_CONTROL_CANCEL, &error) ||
+                        error == TOX_ERR_FILE_CONTROL_NOT_FOUND) file.wireFinished = true;
+                }
+                // Called only after tox_iterate has returned. Natural completion
+                // has now freed its receiver slot; CANCEL was queued before Done.
+                if (file.wireFinished && (!peer.capable || SendFileProtocol(file.info.contact, 4, file.id.data()))) {
+                    erase.push_back(item.first);
+                    continue;
+                }
+            } else {
+                if (file.cancelRequested && !file.controlSent)
+                    file.controlSent = SendFileProtocol(file.info.contact, 3, file.id.data());
+                if (file.wireFinished && file.receiverDone) {
+                    erase.push_back(item.first);
+                    continue;
+                }
+            }
+            if (!peer.blocked && now >= file.deadline) {
+                peer.blocked = true;
+                file.info.detail += " Safe transfer cleanup was not acknowledged. Reconnect this peer before sending more files; text chat remains available.";
+                PublishTransfer(file, EventType::FileFinished);
+            }
+        }
+        for (auto token : erase) EraseFile(token);
+
+        // Starting native offers only here (outside Tox callbacks) keeps slot
+        // reuse ordered after both Tox termination and the peer's Done fence.
+        std::vector<uint64_t> pending;
+        for (const auto& item : activeFiles) if (!item.second->bound && !Finished(item.second->info.state)) pending.push_back(item.first);
+        for (auto token : pending) {
+            auto found = activeFiles.find(token);
+            if (found == activeFiles.end()) continue;
+            auto& file = *found->second;
+            auto& peer = filePeers[file.info.contact];
+            if (peer.blocked) {
+                FinishFile(token, FileState::Failed, "File transfers are blocked until this peer reconnects because safe cleanup was not acknowledged. Text chat remains available.", false);
+                continue;
+            }
+            if (!peer.capable) {
+                if (now - peer.lastHello >= std::chrono::seconds(1)) {
+                    if (SendFileProtocol(file.info.contact, 1)) peer.lastHello = now;
+                }
+                if (now >= file.deadline)
+                    FinishFile(token, FileState::Failed, "File sharing requires WinPopup 0.3 or later at both ends. The peer did not confirm support; text chat is still available.", false);
+                continue;
+            }
+            bool fenced = false;
+            for (const auto& other : activeFiles) {
+                if (other.second->bound && other.second->info.contact == file.info.contact &&
+                    other.second->info.direction == FileDirection::Outgoing && Finished(other.second->info.state)) { fenced = true; break; }
+            }
+            if (fenced || peer.helloReply) continue;
+            Tox_Err_File_Send error;
+            const auto& name = file.info.name;
+            uint32_t number = tox_file_send(tox, file.info.contact, TOX_FILE_KIND_DATA, file.info.size, file.id.data(),
+                reinterpret_cast<const uint8_t*>(name.data()), name.size(), &error);
+            if (error != TOX_ERR_FILE_SEND_OK) {
+                FinishFile(token, FileState::Failed, "Could not offer the file (Tox error " + std::to_string(error) + ").", false);
+                continue;
+            }
+            file.fileNumber = number;
+            file.bound = true;
+            if (fileNumbers.count({file.info.contact, number})) {
+                peer.blocked = true;
+                FinishFile(token, FileState::Failed, "The network reused an active identifier. Reconnect this peer before sending more files.", true);
+                continue;
+            }
+            fileNumbers[{file.info.contact, number}] = token;
+            file.info.detail = "Waiting for the other person to accept the file.";
+            PublishTransfer(file, EventType::FileProgress);
+        }
+    }
+
+    void BeginSendFile(const Command& command) {
+        auto file = std::make_unique<ActiveFile>();
+        file->info.token = command.token;
+        file->info.contact = command.contact;
+        file->info.direction = FileDirection::Outgoing;
+        file->info.path = command.path;
+        file->info.publicKey = command.other;
+        auto* current = file.get();
+        activeFiles.emplace(command.token, std::move(file));
+        auto fail = [&](const std::string& message) { FinishFile(command.token, FileState::Failed, message, true); };
+        if (activeFiles.size() > ActiveFileLimit) { fail("At most 8 file transfers can be active at once."); return; }
+        Tox_Public_Key key;
+        if (!tox_friend_get_public_key(tox, command.contact, key, nullptr) || command.other.empty() || Hex(key, sizeof key) != command.other) {
+            fail("File not sent: the selected contact changed or no longer exists. Select the contact again."); return;
+        }
+        if (tox_friend_get_connection_status(tox, command.contact, nullptr) == TOX_CONNECTION_NONE) {
+            fail("File not sent: this contact is offline or no longer exists."); return;
+        }
+        current->info.publicKey = Hex(key, sizeof key);
+        if (command.path.empty() || command.path.find(L'\0') != std::wstring::npos) { fail("Choose a valid source file."); return; }
+        try {
+            auto path = std::filesystem::absolute(std::filesystem::path(command.path));
+            auto basename = path.filename().u8string();
+            current->info.name = SafeFileName(reinterpret_cast<const uint8_t*>(basename.data()), basename.size());
+            current->info.path = path.wstring();
+            current->handle.value = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (current->handle.value == INVALID_HANDLE_VALUE) { fail(SystemError("Could not open the source file for reading")); return; }
+            BY_HANDLE_FILE_INFORMATION information{};
+            LARGE_INTEGER size{};
+            if (GetFileType(current->handle.value) != FILE_TYPE_DISK ||
+                !GetFileInformationByHandle(current->handle.value, &information) ||
+                (information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !GetFileSizeEx(current->handle.value, &size) || size.QuadPart < 0) {
+                fail("Choose a regular file, not a directory or device."); return;
+            }
+            current->info.size = static_cast<uint64_t>(size.QuadPart);
+            if (current->info.size > FileSizeLimit) { fail("The maximum file size is 2 GiB."); return; }
+            randombytes_buf(current->id.data(), current->id.size());
+            current->deadline = Clock::now() + FileHandshakeTimeout;
+            current->info.detail = "Checking that the other app supports safe WinPopup file transfers...";
+            PublishTransfer(*current, EventType::FileProgress);
+        } catch (const std::exception&) { fail("Could not open or prepare the source file. Check the path and available memory."); }
+    }
+
+    void ReceiveFileOffer(uint32_t contact, uint32_t number, uint32_t kind, uint64_t size, const uint8_t* name, size_t length) {
+        // Never guess direction from Tox's recyclable numeric identifiers.
+        if (fileNumbers.count({contact, number})) {
+            StopFilesForContact(contact, "The peer reused an active transfer identifier.", true);
+            tox_file_control(tox, contact, number, TOX_FILE_CONTROL_CANCEL, nullptr);
+            return;
+        }
+        auto file = std::make_unique<ActiveFile>();
+        file->info.token = NewTransferToken();
+        file->info.contact = contact;
+        file->info.name = SafeFileName(name, length);
+        file->info.size = size;
+        file->info.direction = FileDirection::Incoming;
+        file->info.detail = "Waiting for your permission to save this file.";
+        Tox_Public_Key key;
+        if (tox_friend_get_public_key(tox, contact, key, nullptr)) file->info.publicKey = Hex(key, sizeof key);
+        file->fileNumber = number;
+        file->bound = true;
+        tox_file_get_file_id(tox, contact, number, file->id.data(), nullptr);
+        uint64_t token = file->info.token;
+        auto* current = file.get();
+        activeFiles.emplace(token, std::move(file));
+        fileNumbers[{contact, number}] = token;
+        if (!filePeers[contact].capable || filePeers[contact].blocked || kind != TOX_FILE_KIND_DATA || size > FileSizeLimit || activeFiles.size() > ActiveFileLimit) {
+            FinishFile(token, FileState::Failed, !filePeers[contact].capable || filePeers[contact].blocked ?
+                "File sharing requires WinPopup 0.3 or later at both ends. Text chat is still available." :
+                kind != TOX_FILE_KIND_DATA ? "Unsupported file type; only ordinary file transfers are accepted." :
+                size > FileSizeLimit ? "File rejected: the maximum supported size is 2 GiB." : "File rejected: 8 transfers are already active.", true);
+            return;
+        }
+        PublishTransfer(*current, EventType::FileOffer);
+    }
+
+    void AcceptIncomingFile(const Command& command) {
+        auto found = activeFiles.find(command.token);
+        if (found == activeFiles.end() || found->second->info.direction != FileDirection::Incoming ||
+            found->second->info.state != FileState::Offered || found->second->ownsPartial) {
+            TransferCommandStatus(command.token); return;
+        }
+        auto& file = *found->second;
+        auto fail = [&](const std::string& message) { FinishFile(command.token, FileState::Failed, message, true); };
+        try {
+            if (command.path.empty() || command.path.find(L'\0') != std::wstring::npos) { fail("Choose a valid destination filename."); return; }
+            auto destination = std::filesystem::absolute(std::filesystem::path(command.path));
+            auto basename = destination.filename().u8string();
+            if (basename.empty() || basename == "." || basename == ".." || basename.find_first_of("<>:\"|?*") != std::string::npos ||
+                basename.back() == '.' || basename.back() == ' ' || ReservedFileName(basename) ||
+                destination.wstring().rfind(L"\\\\.\\", 0) == 0) {
+                fail("Choose a normal destination filename, not a device name or alternate data stream."); return;
+            }
+            DWORD attributes = GetFileAttributesW(destination.c_str());
+            DWORD pathError = GetLastError();
+            if (attributes != INVALID_FILE_ATTRIBUTES) { fail("That destination already exists. Choose a new filename; nothing was overwritten."); return; }
+            if (pathError != ERROR_FILE_NOT_FOUND && pathError != ERROR_PATH_NOT_FOUND) { fail("The destination cannot be checked safely. Choose another location."); return; }
+            std::array<uint8_t, 8> random{};
+            randombytes_buf(random.data(), random.size());
+            auto suffix = Hex(random.data(), random.size());
+            file.partial = destination;
+            file.partial += L".winpopup-part-" + std::wstring(suffix.begin(), suffix.end());
+            file.handle.value = CreateFileW(file.partial.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (file.handle.value == INVALID_HANDLE_VALUE) { fail(SystemError("Could not create the temporary download file")); return; }
+            file.ownsPartial = true;
+            file.info.path = destination.wstring();
+            Tox_Err_File_Control error;
+            if (!tox_file_control(tox, file.info.contact, file.fileNumber, TOX_FILE_CONTROL_RESUME, &error)) {
+                fail("Could not accept this file (Tox error " + std::to_string(error) + ")."); return;
+            }
+            file.info.state = FileState::Transferring;
+            file.info.detail = "Receiving into a temporary file; the final filename appears only after completion.";
+            PublishTransfer(file, EventType::FileProgress);
+        } catch (const std::exception&) { fail("Could not prepare the download path. Choose a writable destination."); }
+    }
+
+    void FileControl(uint32_t contact, uint32_t number, Tox_File_Control control) {
+        auto* file = FindFile(contact, number);
+        if (!file) return;
+        if (control == TOX_FILE_CONTROL_CANCEL) {
+            FinishFile(file->info.token, FileState::Cancelled, "The other person cancelled or declined the transfer.", false); return;
+        }
+        if (Finished(file->info.state)) return;
+        // A sender's control cannot authorize an unaccepted incoming download.
+        if (file->info.direction == FileDirection::Incoming && !file->ownsPartial) return;
+        file->info.state = control == TOX_FILE_CONTROL_PAUSE ? FileState::Paused : FileState::Transferring;
+        file->info.detail = control == TOX_FILE_CONTROL_PAUSE ? "Paused by the other person." : "Transferring encrypted file data.";
+        PublishTransfer(*file, EventType::FileProgress);
+    }
+
+    void SendFileChunk(uint32_t contact, uint32_t number, uint64_t position, size_t length) {
+        FileDirection direction = FileDirection::Outgoing;
+        auto* file = FindFile(contact, number, &direction);
+        if (!file) return;
+        const uint64_t token = file->info.token;
+        if (length == 0) {
+            if (Finished(file->info.state)) { file->wireFinished = true; return; }
+            if (position != file->info.size || file->info.transferred != file->info.size)
+                FinishFile(token, FileState::Failed, "The file ended before all expected bytes were transferred.", false);
+            else FinishFile(token, FileState::Completed, "The peer received the final packet. Its disk-save result is not separately acknowledged.", false);
+            return;
+        }
+        if (Finished(file->info.state)) return;
+        if (length > 65536 || position > file->info.size || length > file->info.size - position) {
+            FinishFile(token, FileState::Failed, "The network requested an invalid file range.", true); return;
+        }
+        std::array<uint8_t, 65536> buffer{};
+        LARGE_INTEGER offset{};
+        offset.QuadPart = static_cast<LONGLONG>(position);
+        DWORD read = 0;
+        if (!SetFilePointerEx(file->handle.value, offset, nullptr, FILE_BEGIN) ||
+            !ReadFile(file->handle.value, buffer.data(), static_cast<DWORD>(length), &read, nullptr) || read != length) {
+            FinishFile(token, FileState::Failed, "The source file could not be read completely.", true); return;
+        }
+        Tox_Err_File_Send_Chunk error;
+        if (!tox_file_send_chunk(tox, contact, number, position, buffer.data(), length, &error)) {
+            // Tox re-requests a chunk if its send queue was full. Seeking above
+            // supports repeated requests without buffering the whole file.
+            if (error != TOX_ERR_FILE_SEND_CHUNK_SENDQ)
+                FinishFile(token, FileState::Failed, "Could not send a file chunk (Tox error " + std::to_string(error) + ").", true);
+            return;
+        }
+        file->info.transferred = std::max(file->info.transferred, position + length);
+        file->info.state = FileState::Transferring;
+        PublishTransfer(*file, EventType::FileProgress, false);
+    }
+
+    void ReceiveFileChunk(uint32_t contact, uint32_t number, uint64_t position, const uint8_t* data, size_t length) {
+        FileDirection direction = FileDirection::Incoming;
+        auto* file = FindFile(contact, number, &direction);
+        if (!file) return;
+        if (Finished(file->info.state)) return;
+        const uint64_t token = file->info.token;
+        if (!file->ownsPartial || file->handle.value == INVALID_HANDLE_VALUE) {
+            FinishFile(token, FileState::Failed, "Data arrived before this download was accepted.", true); return;
+        }
+        if (position != file->info.transferred || position > file->info.size || length > file->info.size - position || length > 65536) {
+            FinishFile(token, FileState::Failed, "The incoming file data did not match its expected position or size.", true); return;
+        }
+        if (length == 0) {
+            if (position != file->info.size) { FinishFile(token, FileState::Failed, "The file ended before all expected bytes arrived.", true); return; }
+            if (!FlushFileBuffers(file->handle.value)) { FinishFile(token, FileState::Failed, "Could not flush the downloaded file to disk.", true); return; }
+            file->handle.Reset();
+            if (!MoveFileExW(file->partial.c_str(), file->info.path.c_str(), MOVEFILE_WRITE_THROUGH)) {
+                FinishFile(token, FileState::Failed, "Could not publish the completed download. The destination may already exist; nothing was overwritten.", true); return;
+            }
+            file->ownsPartial = false;
+            FinishFile(token, FileState::Completed, "File received completely and saved. It has not been opened.", false);
+            return;
+        }
+        DWORD written = 0;
+        if (!WriteFile(file->handle.value, data, static_cast<DWORD>(length), &written, nullptr) || written != length) {
+            FinishFile(token, FileState::Failed, "Could not write the downloaded file. Check disk space and folder access.", true); return;
+        }
+        file->info.transferred += length;
+        file->info.state = FileState::Transferring;
+        PublishTransfer(*file, EventType::FileProgress, false);
+    }
+
     template<typename Function> static void Callback(void* context, Function&& function) noexcept {
         auto* self = static_cast<Impl*>(context);
         try { function(*self); }
@@ -299,8 +826,16 @@ struct Core::Impl {
                 self.Push(std::move(event));
             });
         });
-        tox_callback_friend_connection_status(tox, [](Tox*, uint32_t, Tox_Connection, void* context) {
-            Callback(context, [](Impl& self) { self.contactsChanged = true; self.dirty = true; });
+        tox_callback_friend_connection_status(tox, [](Tox*, uint32_t number, Tox_Connection status, void* context) {
+            Callback(context, [=](Impl& self) {
+                self.contactsChanged = true;
+                self.dirty = true;
+                if (status == TOX_CONNECTION_NONE) self.StopFilesForContact(number, "The peer disconnected. The incomplete transfer was cancelled.", false);
+                else {
+                    auto& peer = self.filePeers[number];
+                    if (self.SendFileProtocol(number, 1)) peer.lastHello = Clock::now();
+                }
+            });
         });
         tox_callback_friend_name(tox, [](Tox*, uint32_t, const uint8_t*, size_t, void* context) {
             // Tox emits this callback before it overwrites the old stored name.
@@ -334,6 +869,23 @@ struct Core::Impl {
                 event.text = "Delivered to their app";
                 self.Push(std::move(event));
             });
+        });
+        tox_callback_friend_lossless_packet(tox, [](Tox*, uint32_t contact, const uint8_t* data, size_t length, void* context) {
+            Callback(context, [=](Impl& self) { self.FileProtocolPacket(contact, data, length); });
+        });
+        tox_callback_file_recv(tox, [](Tox*, uint32_t contact, uint32_t number, uint32_t kind, uint64_t size,
+            const uint8_t* name, size_t length, void* context) {
+            Callback(context, [=](Impl& self) { self.ReceiveFileOffer(contact, number, kind, size, name, length); });
+        });
+        tox_callback_file_recv_control(tox, [](Tox*, uint32_t contact, uint32_t number, Tox_File_Control control, void* context) {
+            Callback(context, [=](Impl& self) { self.FileControl(contact, number, control); });
+        });
+        tox_callback_file_chunk_request(tox, [](Tox*, uint32_t contact, uint32_t number, uint64_t position, size_t length, void* context) {
+            Callback(context, [=](Impl& self) { self.SendFileChunk(contact, number, position, length); });
+        });
+        tox_callback_file_recv_chunk(tox, [](Tox*, uint32_t contact, uint32_t number, uint64_t position,
+            const uint8_t* data, size_t length, void* context) {
+            Callback(context, [=](Impl& self) { self.ReceiveFileChunk(contact, number, position, data, length); });
         });
     }
 
@@ -569,6 +1121,7 @@ struct Core::Impl {
             break;
         }
         case Operation::Remove: {
+            StopFilesForContact(command.contact, "The contact was removed. The incomplete transfer was cancelled.", true);
             if (!tox_friend_delete(tox, command.contact, nullptr)) { Error("This contact could not be removed.", command.contact); break; }
             dirty = true;
             RefreshContacts();
@@ -629,10 +1182,19 @@ struct Core::Impl {
                 Error("Could not bootstrap from the specified peer (Tox error " + std::to_string(error) + ").");
             break;
         }
+        case Operation::SendFile: BeginSendFile(command); break;
+        case Operation::AcceptFile: AcceptIncomingFile(command); break;
+        case Operation::CancelFile:
+            if (activeFiles.count(command.token)) FinishFile(command.token, FileState::Cancelled, "The transfer was cancelled locally.", true);
+            else TransferCommandStatus(command.token);
+            break;
         }
     }
 
     void Cleanup() noexcept {
+        try { StopAllFiles("WinPopup stopped. Incomplete transfers must be sent again."); } catch (...) {}
+        activeFiles.clear();
+        fileNumbers.clear();
         if (tox) { tox_kill(tox); tox = nullptr; }
         if (saveKey) { tox_pass_key_free(saveKey); saveKey = nullptr; }
         profileLock.Reset();
@@ -677,6 +1239,7 @@ struct Core::Impl {
                 for (const auto& command : pending) Execute(command);
                 if (finish) break;
                 tox_iterate(tox, this);
+                PumpFiles();
                 if (contactsChanged) {
                     contactsChanged = false;
                     RefreshContacts();
@@ -692,6 +1255,7 @@ struct Core::Impl {
                 std::unique_lock<std::mutex> lock(mutex);
                 wake.wait_for(lock, interval, [this] { return stopping || !commands.empty(); });
             }
+            StopAllFiles("WinPopup stopped. Incomplete transfers must be sent again.");
             SaveOrNotify(true);
         } catch (const std::exception& exception) {
             if (!signalled) {
@@ -723,6 +1287,7 @@ bool Core::Start(const CoreOptions& options, std::string& error) {
         impl_->commands.clear();
         impl_->events.clear();
         impl_->contacts.clear();
+        impl_->transfers.clear();
         impl_->address.clear();
         impl_->selfName.clear();
         impl_->dhtKey.clear();
@@ -767,6 +1332,26 @@ void Core::AddFriend(const std::string& invitation, const std::string& hello) { 
 void Core::AcceptFriend(const std::string& publicKey) { impl_->Enqueue({Impl::Operation::Accept, 0, publicKey, {}}); }
 void Core::RemoveFriend(uint32_t number) { impl_->Enqueue({Impl::Operation::Remove, number, {}, {}}); }
 void Core::Send(uint32_t number, const std::string& text) { impl_->Enqueue({Impl::Operation::Send, number, text, {}}); }
+uint64_t Core::SendFile(uint32_t number, const std::wstring& sourcePath, const std::string& expectedPublicKey) {
+    const auto token = impl_->NewTransferToken();
+    std::string expected = expectedPublicKey;
+    if (expected.empty()) {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        auto contact = std::find_if(impl_->contacts.begin(), impl_->contacts.end(), [=](const Contact& value) { return value.number == number; });
+        if (contact != impl_->contacts.end()) expected = contact->publicKey;
+    }
+    Tox_Public_Key decoded;
+    if (Decode(expected, decoded, sizeof decoded)) expected = Hex(decoded, sizeof decoded);
+    impl_->Enqueue({Impl::Operation::SendFile, number, {}, expected, 0, token, sourcePath});
+    return token;
+}
+void Core::AcceptFile(uint64_t token, const std::wstring& destination) {
+    impl_->Enqueue({Impl::Operation::AcceptFile, 0, {}, {}, 0, token, destination});
+}
+void Core::CancelFile(uint64_t token) { impl_->Enqueue({Impl::Operation::CancelFile, 0, {}, {}, 0, token, {}}); }
+std::vector<FileTransfer> Core::Transfers() const { std::lock_guard<std::mutex> lock(impl_->mutex); return impl_->transfers; }
+uint64_t Core::MaxFileBytes() { return FileSizeLimit; }
+size_t Core::MaxActiveFiles() { return ActiveFileLimit; }
 void Core::Rename(const std::string& name) { impl_->Enqueue({Impl::Operation::Rename, 0, name, {}}); }
 void Core::RetryBootstrap() { impl_->Enqueue({Impl::Operation::Retry, 0, {}, {}}); }
 void Core::Bootstrap(const std::string& host, uint16_t port, const std::string& key) { impl_->Enqueue({Impl::Operation::Bootstrap, 0, host, key, port}); }

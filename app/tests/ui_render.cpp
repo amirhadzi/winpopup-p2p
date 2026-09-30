@@ -71,16 +71,62 @@ bool RenderSetup(const std::wstring& output) {
     }
     bool saved=bitmap.Save(output+L"\\setup-"+std::to_wstring(dpi)+L"dpi.bmp");DestroyWindow(w);return saved&&valid;
 }
+bool RenderInvitationFixture(const std::wstring& output) {
+    const std::string uri="tox:000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F202122230202";
+    App app;app.preview=true;app.invitationText=Wide(uri);std::string error;
+    if(!popup::MakeInvitationQr(uri,app.invitationQr,error))return false;
+    int width=S(560),height=S(318);
+    HWND w=CreateWindowExW(WS_EX_CONTROLPARENT,L"WinPopupInvitation",L"My Invitation fixture",WS_POPUP|WS_SYSMENU|WS_CLIPCHILDREN,
+        0,0,width,height,nullptr,nullptr,instance,&app);
+    if(!w)return false;
+    fixture::Bitmap bitmap(width,height);PaintInvitation(app,bitmap.dc,{0,0,width,height});
+    for(HWND child=GetWindow(w,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT))PrintControl(bitmap.dc,w,child);
+    bool okay=WindowText(app.invitationEdit)==Wide(uri)&&bitmap.Save(output+L"\\invitation-"+std::to_wstring(dpi)+L"dpi.bmp");
+    auto dib=QrClipboardDib(app.invitationQr);
+    if(dib.size()<sizeof(BITMAPINFOHEADER))okay=false;
+    else{
+        auto header=reinterpret_cast<const BITMAPINFOHEADER*>(dib.data());
+        fixture::Bitmap copy(header->biWidth,header->biHeight);
+        StretchDIBits(copy.dc,0,0,copy.width,copy.height,0,0,copy.width,copy.height,dib.data()+sizeof(BITMAPINFOHEADER),
+            reinterpret_cast<const BITMAPINFO*>(dib.data()),DIB_RGB_COLORS,SRCCOPY);
+        okay=copy.Save(output+L"\\clipboard-qr-"+std::to_wstring(dpi)+L"dpi.bmp")&&okay;
+    }
+    DestroyWindow(w);std::printf("Invitation %d DPI: displayed ID and clipboard bitmap: %s\n",dpi,okay?"PASS":"FAIL");return okay;
+}
+bool RenderTransfersFixture(const std::wstring& output) {
+    App app;app.preview=true;
+    popup::FileTransfer incoming;incoming.token=10;incoming.contact=42;incoming.publicKey=std::string(64,'A');incoming.name="holiday-photo.png";
+    incoming.size=245760;incoming.direction=popup::FileDirection::Incoming;incoming.detail="Waiting for your permission to save this file.";
+    popup::FileTransfer outgoing;outgoing.token=11;outgoing.contact=43;outgoing.publicKey=std::string(64,'B');outgoing.name="project-files.zip";
+    outgoing.size=5242880;outgoing.transferred=1940000;outgoing.direction=popup::FileDirection::Outgoing;outgoing.state=popup::FileState::Transferring;
+    app.transfers={incoming,outgoing};app.transferNames[10]=L"Alex";app.transferNames[11]=L"Jamie";app.selectedTransfer=10;
+    int width=S(760),height=S(398);
+    HWND w=CreateWindowExW(WS_EX_CONTROLPARENT,L"WinPopupTransfers",L"File Transfers fixture",WS_POPUP|WS_SYSMENU|WS_CLIPCHILDREN,
+        0,0,width,height,nullptr,nullptr,instance,&app);
+    if(!w)return false;
+    auto paint=[&](const std::wstring& name){fixture::Bitmap bitmap(width,height);PaintTransfers(app,bitmap.dc,{0,0,width,height});
+        for(HWND child=GetWindow(w,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT))PrintControl(bitmap.dc,w,child);
+        return bitmap.Save(output+L"\\"+name+L"-"+std::to_wstring(dpi)+L"dpi.bmp");};
+    bool okay=ListView_GetItemCount(app.transferList)==2&&IsWindowEnabled(app.transferAccept)&&IsWindowEnabled(app.transferDecline)&&!IsWindowEnabled(app.transferFolder);
+    okay=paint(L"file-offer")&&okay;
+    app.transfers[0].state=popup::FileState::Transferring;app.transfers[0].transferred=123000;app.transfers[0].detail="Receiving encrypted image data.";RefreshTransfers(app);
+    okay=IsWindowEnabled(app.transferCancel)&&!IsWindowEnabled(app.transferAccept)&&paint(L"file-progress")&&okay;
+    app.transfers[0].state=popup::FileState::Completed;app.transfers[0].transferred=incoming.size;app.transfers[0].path=L"C:\\Downloads\\holiday-photo.png";
+    app.transfers[0].detail="File received completely and saved. It has not been opened.";RefreshTransfers(app);
+    okay=IsWindowEnabled(app.transferFolder)&&!IsWindowEnabled(app.transferCancel)&&paint(L"file-saved")&&okay;
+    DestroyWindow(w);std::printf("File transfers %d DPI: offer/progress/saved controls and fixtures: %s\n",dpi,okay?"PASS":"FAIL");return okay;
+}
 int wmain(int argc,wchar_t**argv){
     if(argc!=2){std::fwprintf(stderr,L"Usage: ui_render EXISTING_OUTPUT_DIRECTORY\n");return 2;}
     instance=GetModuleHandleW(nullptr);SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);SetThemeAppProperties(0);
     faceBrush=CreateSolidBrush(FaceColor);whiteBrush=CreateSolidBrush(White);
-    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};InitCommonControlsEx(&controls);RegisterClasses();
+    INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES|ICC_LISTVIEW_CLASSES|ICC_PROGRESS_CLASS};InitCommonControlsEx(&controls);RegisterClasses();
     bool okay=true;
     for(int scale:{96,120,144}){
         dpi=scale;MakeFonts();okay=RenderClassic(argv[1])&&okay;okay=RenderSetup(argv[1])&&okay;
+        okay=RenderInvitationFixture(argv[1])&&okay;okay=RenderTransfersFixture(argv[1])&&okay;
         DeleteObject(font);DeleteObject(boldFont);
     }
     DeleteObject(faceBrush);DeleteObject(whiteBrush);
-    std::printf("12 classic interface fixture files: %s\n",okay?"PASS":"FAIL");return okay?0:1;
+    std::printf("Classic interface fixture files: %s\n",okay?"PASS":"FAIL");return okay?0:1;
 }

@@ -1,8 +1,11 @@
 * text=auto
 *.cpp text eol=lf
+*.hpp text eol=lf
 *.h text eol=lf
 *.md text eol=lf
+*.markdown text eol=lf
 *.txt text eol=lf
 *.ps1 text eol=crlf
 *.png binary
 *.ico binary
+*.patch text eol=lf

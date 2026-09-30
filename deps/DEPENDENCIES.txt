@@ -12,7 +12,29 @@ https://github.com/TokTok/c-toxcore/releases/tag/v0.2.23
 Archive: c-toxcore-v0.2.23.tar.gz
 SHA256: 15cdd006ed7793dfc657e340ef9f218f6637d2fe5b130704d39b961389bb6cd6
 This official release archive contains the corresponding source, including CMP.
-Its hash matches GitHub's release asset digest. No Tox source was modified.
+Its hash matches GitHub's release asset digest. The archive remains unmodified.
+The build applies the local cancellation patch documented below.
+
+Local Tox patch (WinPopup P2P, 30 September 2026)
+-----------------------------------------------
+File: toxcore-idempotent-cancel.patch
+SHA256: 37600a51abb4481df9ceab18d64ffd6e79750ea798693273d036a85a5b4a9643
+License: GPL-3.0-or-later, as part of the modified c-toxcore code.
+Origin: local fix to c-toxcore 0.2.23 toxcore/Messenger.c handle_filecontrol.
+
+An incoming CANCEL/KILL for an already-ended transfer is now ignored instead
+of answered with another KILL. The original behavior can create reciprocal
+KILL packets that later cancel a new transfer reusing the same numeric slot.
+Existing active-transfer cancellation and other controls remain unchanged.
+The application additionally orders transfer teardown using its file-ID fence;
+this small dependency change alone is not a full slot-reuse protocol.
+
+Messenger.c SHA256 before patch:
+  a8978e7f6333ae151c6fac16a3d4094e5fb79160384d99585ec9cc7ecfec6f70
+Messenger.c SHA256 after patch:
+  85ff7d48aad9b5ffc57018ec3deb3a021d17fdd4f420b64f894628b427239991
+The build verifies the patch and source hashes, applies it idempotently, and
+verifies the exact result before writing. Unexpected source changes fail closed.
 
 CMP (MIT)
 The exact revision bundled by the c-toxcore 0.2.23 full source release is used.
@@ -50,7 +72,8 @@ texts go into install. The script supports -VisualStudioPath for custom installs
 
 NMake Makefiles are used to avoid MSBuild's SDK discovery on restricted hosts.
 The top-level CMakeLists.txt uses the exact production source list in the
-upstream Tox CMake file and adds toxencryptsave. Source files remain unchanged.
+upstream Tox CMake file and adds toxencryptsave. The sole Tox source change is
+the verified local cancellation patch described above.
 
 Consumer link settings
 ----------------------
@@ -72,13 +95,14 @@ The application-level integration tests separately verify peer messaging.
 Suggested source distribution contents
 --------------------------------------
 Include CMakeLists.txt, build-dependencies.ps1, DEPENDENCIES.txt,
-dependency-smoke.c, install/, and these complete source archives:
+toxcore-idempotent-cancel.patch, dependency-smoke.c, install/, and these archives:
   c-toxcore-v0.2.23.tar.gz
+  libsodium-1.0.22-msvc.zip
   libsodium-1.0.22.tar.gz
   pthreads4w-code-v3.0.0.zip
 
-The large libsodium MSVC archive may be omitted from the source package;
-the dependency build script downloads and verifies it when rebuilding.
+The release source package includes all four pinned archives for offline builds.
+The dependency build script downloads and verifies any missing input archive.
 The bundled install/ static libraries let users compile the app immediately.
 
 Bootstrap nodes

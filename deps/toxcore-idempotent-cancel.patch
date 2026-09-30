@@ -1,0 +1,15 @@
+--- a/toxcore/Messenger.c
++++ b/toxcore/Messenger.c
+@@ -1751,6 +1751,12 @@
+     struct File_Transfers *ft = get_file_transfer(outbound, filenumber, &real_filenumber, &m->friendlist[friendnumber]);
+ 
+     if (ft == nullptr) {
++        /* WinPopup P2P local patch, 2026-09-30: cancellation is idempotent.
++         * Echoing KILL for a completed slot creates reciprocal KILL packets
++         * which can cancel a later transfer reusing that slot. */
++        if (control_type == FILECONTROL_KILL) {
++            return 0;
++        }
+         LOGGER_DEBUG(m->log, "file control (friend %d, file %d): file transfer does not exist; telling the other to kill it",
+                      friendnumber, filenumber);
+         send_file_control_packet(m, friendnumber, !outbound, filenumber, FILECONTROL_KILL, nullptr, 0);

@@ -24,6 +24,8 @@ struct BehaviorFixture {
     }
     ~BehaviorFixture() {
         if (app.composeWindow) DestroyWindow(app.composeWindow);
+        if (app.transfersWindow) DestroyWindow(app.transfersWindow);
+        if (app.invitationWindow) DestroyWindow(app.invitationWindow);
         if (app.window) DestroyWindow(app.window);
     }
     void Contacts() {
@@ -34,6 +36,11 @@ struct BehaviorFixture {
         HWND window = CreateWindowExW(WS_EX_CONTROLPARENT, L"WinPopupCompose", L"Hidden composer",
             WS_POPUP | WS_CLIPCHILDREN, 0, 0, 308, 298, app.window, nullptr, instance, &app);
         if (!window) throw std::runtime_error("Could not create hidden production composer");
+    }
+    void TransfersWindow() {
+        HWND window = CreateWindowExW(WS_EX_CONTROLPARENT, L"WinPopupTransfers", L"Hidden file transfers",
+            WS_POPUP | WS_CLIPCHILDREN, 0, 0, 760, 398, app.window, nullptr, instance, &app);
+        if (!window) throw std::runtime_error("Could not create hidden production transfer window");
     }
 };
 
@@ -254,6 +261,139 @@ void TestTypedRecipientRefresh() {
         WindowText(app.messageEdit) == L"Sam's stored draft",
         "explicit selection leaves typed mode and restores that peer's draft");
 }
+
+popup::FileTransfer TransferFixture(uint64_t token, popup::FileDirection direction) {
+    popup::FileTransfer transfer;
+    transfer.token = token;
+    transfer.contact = 12;
+    transfer.publicKey = std::string(64, 'A');
+    transfer.name = u8"picture-你好.png";
+    transfer.size = 1000;
+    transfer.direction = direction;
+    transfer.state = popup::FileState::Offered;
+    transfer.detail = "Awaiting permission";
+    return transfer;
+}
+
+void TestTransferStates() {
+    BehaviorFixture fixture;
+    fixture.Contacts();
+    auto& app = fixture.app;
+    popup::Event event;
+    event.type = popup::EventType::FileOffer;
+    event.transfer = TransferFixture(100, popup::FileDirection::Incoming);
+    HandleEvent(app, event);
+    fixture.TransfersWindow();
+    CheckBehavior(app.transfers.size() == 1 && app.selectedTransfer == 100 &&
+        IsWindowEnabled(app.transferAccept) && IsWindowEnabled(app.transferDecline) &&
+        !IsWindowEnabled(app.transferFolder), "incoming offer enables explicit accept and decline without exposing a saved file");
+    CheckBehavior(app.transferNames[100] == L"Alex" && app.transfers[0].path.empty() &&
+        ListView_GetItemCount(app.transferList) == 1, "offer keeps authenticated identity and untrusted filename separate from destination");
+    app.acceptingTransfers.insert(100);
+    UpdateTransferDetails(app);
+    CheckBehavior(!IsWindowEnabled(app.transferAccept) && !IsWindowEnabled(app.transferDecline) &&
+        IsWindowEnabled(app.transferCancel), "pending acceptance prevents duplicate accepts while permitting cancellation");
+    event.type = popup::EventType::FileProgress;
+    event.transfer.state = popup::FileState::Transferring;
+    event.transfer.transferred = 250;
+    event.transfer.path = L"C:\\download-fixture\\picture.png";
+    HandleEvent(app, event);
+    CheckBehavior(app.acceptingTransfers.empty() && !IsWindowEnabled(app.transferAccept) &&
+        !IsWindowEnabled(app.transferDecline) && IsWindowEnabled(app.transferCancel) &&
+        !IsWindowEnabled(app.transferFolder), "active transfer clears pending acceptance and enables only cancellation");
+    CheckBehavior(SendMessageW(app.transferProgress, PBM_GETPOS, 0, 0) == 250 &&
+        FileStatus(app.transfers[0]) == L"Receiving", "progress reflects byte counts without claiming completion");
+    event.type = popup::EventType::FileFinished;
+    event.transfer.state = popup::FileState::Completed;
+    event.transfer.transferred = 1000;
+    HandleEvent(app, event);
+    CheckBehavior(IsWindowEnabled(app.transferFolder) && !IsWindowEnabled(app.transferCancel) &&
+        !IsWindowEnabled(app.transferAccept) && FileStatus(app.transfers[0]) == L"Saved",
+        "only completed incoming files enable Show Folder and say Saved");
+    event.transfer = TransferFixture(101, popup::FileDirection::Outgoing);
+    event.transfer.state = popup::FileState::Completed;
+    event.transfer.transferred = 1000;
+    event.transfer.path = L"C:\\source-fixture\\picture.png";
+    HandleEvent(app, event);
+    app.selectedTransfer = 101;
+    RefreshTransfers(app);
+    CheckBehavior(!IsWindowEnabled(app.transferFolder) && FileStatus(*SelectedFile(app)) == L"Sent to peer" &&
+        app.transfers.size() == 2, "outgoing completion is distinct from a saved incoming file");
+    app.contacts[0].name = "Different person";
+    app.contacts[0].publicKey = std::string(64, 'B');
+    event.type = popup::EventType::FileOffer;
+    event.transfer = TransferFixture(102, popup::FileDirection::Incoming);
+    HandleEvent(app, event);
+    CheckBehavior(app.transferNames[100] == L"Alex" && app.transferNames[102] != L"Different person" &&
+        app.selectedTransfer == 102, "transfer tokens retain original identity when a contact number is reused");
+    event.type = popup::EventType::FileFinished;
+    event.transfer.state = popup::FileState::Cancelled;
+    HandleEvent(app, event);
+    CheckBehavior(!IsWindowEnabled(app.transferAccept) && !IsWindowEnabled(app.transferDecline) &&
+        !IsWindowEnabled(app.transferCancel) && !IsWindowEnabled(app.transferFolder),
+        "cancelled or declined transfers cannot be accepted or opened");
+    event.transfer = TransferFixture(103, popup::FileDirection::Incoming);
+    event.transfer.state = popup::FileState::Failed;
+    app.acceptingTransfers.insert(103);
+    HandleEvent(app, event);
+    CheckBehavior(app.acceptingTransfers.empty(), "failed destination preparation clears pending acceptance");
+    const auto count = app.transfers.size();
+    app.core.Poll();
+    DestroyWindow(app.transfersWindow);
+    CheckBehavior(!app.transfersWindow && app.transfers.size() == count && app.core.Poll().empty(),
+        "closing File Transfers preserves history and sends no cancel command");
+    fixture.TransfersWindow();
+    CheckBehavior(ListView_GetItemCount(app.transferList) == static_cast<int>(count),
+        "reopening File Transfers restores transfer history");
+}
+
+void TestTransferHistoryBound() {
+    BehaviorFixture fixture;
+    auto& app = fixture.app;
+    auto active = TransferFixture(500, popup::FileDirection::Incoming);
+    active.state = popup::FileState::Transferring;
+    UpsertTransfer(app, active);
+    for (uint64_t token = 501; token < 640; ++token) {
+        auto completed = TransferFixture(token, popup::FileDirection::Incoming);
+        completed.state = popup::FileState::Completed;
+        UpsertTransfer(app, completed);
+    }
+    CheckBehavior(app.transfers.size() == 128 && app.transferNames.size() == 128 &&
+        std::any_of(app.transfers.begin(), app.transfers.end(), [](const popup::FileTransfer& value) { return value.token == 500; }),
+        "bounded transfer history removes completed entries while retaining active transfers");
+}
+
+void TestQrClipboardBitmap() {
+    popup::QrCode qr;
+    std::string error;
+    // A checksum-valid synthetic address; no real identity or network is used.
+    CheckBehavior(popup::MakeInvitationQr(std::string(76, '0'), qr, error), "synthetic invitation produces QR modules for clipboard tests");
+    auto bytes = QrClipboardDib(qr);
+    CheckBehavior(bytes.size() >= sizeof(BITMAPINFOHEADER), "QR clipboard output contains a DIB header");
+    BITMAPINFOHEADER header{};
+    memcpy(&header, bytes.data(), sizeof(header));
+    const int scale = 6;
+    const int border = popup::InvitationQrQuietZone * scale;
+    const int edge = (qr.size + 2 * popup::InvitationQrQuietZone) * scale;
+    CheckBehavior(header.biSize == sizeof(header) && header.biWidth == edge && header.biHeight == edge &&
+        header.biPlanes == 1 && header.biBitCount == 32 && header.biCompression == BI_RGB &&
+        bytes.size() == sizeof(header) + static_cast<size_t>(edge) * edge * 4,
+        "QR clipboard bitmap has a valid uncompressed bottom-up 32-bit layout");
+    bool quiet = true, accurate = true;
+    for (int y = 0; y < edge; ++y) for (int x = 0; x < edge; ++x) {
+        size_t offset = sizeof(header) + (static_cast<size_t>(edge - 1 - y) * edge + x) * 4;
+        uint8_t actual = bytes[offset];
+        bool inBorder = x < border || y < border || x >= edge - border || y >= edge - border;
+        if (inBorder && (actual != 255 || bytes[offset + 1] != 255 || bytes[offset + 2] != 255)) quiet = false;
+        bool black = !inBorder && qr.Module((x - border) / scale, (y - border) / scale);
+        uint8_t expected = black ? 0 : 255;
+        if (actual != expected || bytes[offset + 1] != expected || bytes[offset + 2] != expected) accurate = false;
+    }
+    CheckBehavior(quiet, "QR clipboard bitmap preserves the complete four-module white quiet zone");
+    CheckBehavior(accurate, "QR clipboard pixels preserve module scale and orientation exactly");
+    popup::QrCode invalid;
+    CheckBehavior(QrClipboardDib(invalid).empty(), "invalid QR data does not produce a clipboard image");
+}
 } // namespace
 
 int wmain() {
@@ -263,7 +403,7 @@ int wmain() {
         MakeFonts();
         faceBrush = CreateSolidBrush(FaceColor);
         whiteBrush = CreateSolidBrush(White);
-        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES};
+        INITCOMMONCONTROLSEX controls{sizeof(controls), ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS};
         InitCommonControlsEx(&controls);
         RegisterClasses();
         TestInboxNavigation();
@@ -272,6 +412,9 @@ int wmain() {
         TestPendingDrafts();
         TestRecipientAndDraftSwitching();
         TestTypedRecipientRefresh();
+        TestTransferStates();
+        TestTransferHistoryBound();
+        TestQrClipboardBitmap();
         DeleteObject(font);
         DeleteObject(boldFont);
         DeleteObject(faceBrush);

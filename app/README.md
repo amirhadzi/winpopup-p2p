@@ -1,10 +1,10 @@
 # WinPopup P2P
 
-A small, portable Windows x64 text messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.2.0 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
+A small, portable Windows x64 messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.3.0 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
 
-## Upgrading from 0.1.0
+## Upgrading from 0.1.0 or 0.2.0
 
-Close the old app, then replace `WinPopup.exe` in your existing portable folder with this version. Keep your `data` folder and use the same password. Your encrypted identity and contacts remain compatible. The network and encrypted-profile formats are unchanged; the interface has been rebuilt.
+Close the old app, then replace `WinPopup.exe` in your existing portable folder with this version. Keep your `data` folder and use the same password. Your encrypted identity and contacts remain compatible.
 
 If you extract the new ZIP into a different folder, copy your existing `data` folder beside the new executable while both copies are closed. Do not run two copies using the same profile.
 
@@ -19,6 +19,20 @@ If you extract the new ZIP into a different folder, copy your existing `data` fo
 The main window shows one received message at a time. Use the arrow toolbar buttons to browse and the delete button to remove the displayed message from this session. The status bar shows the current message and total message count. **Messages > Sent Messages** shows outgoing delivery status. Tox contact management and connection details are in the menus.
 
 An invitation contains a public Tox ID, not a password. You can also exchange IDs with compatible Tox clients. Verify the full ID through a trusted channel when the identity of the person matters; display names are chosen by users.
+
+## Invite QR codes
+
+Choose **Messages > Contacts > My Invitation (QR Code)** to show your complete Tox invitation as both a QR code and selectable text. **Copy ID** retains the usual text workflow; **Copy QR** copies the QR image for pasting into another app. QR generation happens locally, with no QR service or account. The QR contains the same public `tox:` invitation, including its checksum. A QR reader or compatible Tox client can read it; WinPopup does not include a camera scanner.
+
+## Share images and files
+
+Choose **Messages > Send File**, select an online contact, and choose an image or any other file. Pictures are transferred unchanged, without resizing or recompression. Both peers must remain connected. File sharing requires WinPopup 0.3.0 or newer at both ends; older WinPopup versions and other Tox clients can still exchange text.
+
+**Messages > File Transfers** shows incoming offers, filenames, sizes, progress and status. The recipient chooses **Accept** and a new save location, or **Decline**. Transfers can be cancelled. Files are never accepted or opened automatically. **Show Folder** is available after an incoming file has been saved.
+
+Transfers stream over the encrypted Tox connection, with up to 8 active files and a 2 GiB limit per file. Incoming data uses a private temporary file and is published to the chosen name only on completion; failed or cancelled partial files are removed. Existing files are never silently replaced: choose a new filename. Interrupted transfers must be sent again; they do not resume after disconnect or restart. Transfer history is session-only.
+
+For outgoing files, completion means Tox delivered the bytes to the peer. For incoming files, **Saved** confirms that this app finished writing the destination. Neither status means someone opened the file. Received files are ordinary files at the location you chose; profile encryption does not encrypt those saved files.
 
 ## What “no infrastructure” means
 
@@ -35,7 +49,7 @@ The app shows network connectivity and each contact's connection type. “Direct
 - **Password:** There is no password reset service. Keep your password and an offline backup of your profile. Losing either can mean losing access to that identity.
 - **Privacy:** The app uses Tox encryption in transit and the standard Tox encrypted-save format on disk. It does not include analytics, ads, automatic updates, or cloud backup.
 
-This version focuses on one-to-one text messaging. The classic **Workgroup** control is retained for visual familiarity but is disabled: Windows workgroups are not Tox groups. Voice, video, file transfer, group chat, history sync, and offline delivery are outside its scope. It is a development build, not an independently audited product.
+This version supports one-to-one text, image and file sharing. The classic **Workgroup** control is retained for visual familiarity but is disabled: Windows workgroups are not Tox groups. Voice, video, group chat, history sync, and offline delivery are outside its scope. It is a development build, not an independently audited product.
 
 ## Windows requirements
 

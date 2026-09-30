@@ -29,6 +29,6 @@ if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
 if ($Test) {
     $ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
     & $ctestExe --test-dir $BuildDirectory -C Release --output-on-failure
-    if ($LASTEXITCODE -ne 0) { throw 'Core integration test failed.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Application verification failed. See the CTest output above.' }
 }
 Write-Host "Built: $(Join-Path $BuildDirectory 'WinPopup.exe')"

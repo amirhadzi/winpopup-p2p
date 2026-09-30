@@ -1,0 +1,32 @@
+Nayuki QR Code generator library, C++ edition
+Version: v1.8.0
+License: MIT
+
+Official project: https://www.nayuki.io/page/qr-code-generator-library
+Official repository: https://github.com/nayuki/QR-Code-generator
+Release: https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0
+Annotated tag object: 7ad95cedd8464a87f82221283612732ae4f3f305
+Pinned commit: 720f62bddb7226106071d4728c292cb1df519ceb
+Tag date: 2022-04-17T04:15:56Z
+Retrieved: 2026-09-30 over HTTPS from raw.githubusercontent.com
+
+Unmodified upstream files and SHA-256 hashes:
+  qrcodegen.cpp (upstream cpp/qrcodegen.cpp)
+    1f3b3fcdac6954c32cf583ccd02ec9b5901f756a38c461acedc70be4a77d3757
+  qrcodegen.hpp (upstream cpp/qrcodegen.hpp)
+    b779c3b156cf7a57ce789d6fee4fc991ccc2913774d26c909d22bb8f26b2a793
+  UPSTREAM-README.markdown (upstream Readme.markdown)
+    0f8441b248157c13e43c8963ffe1af9eabb3287e24871303c8b16395b6cb7a01
+
+Download URL template:
+  https://raw.githubusercontent.com/nayuki/QR-Code-generator/720f62bddb7226106071d4728c292cb1df519ceb/<upstream-path>
+
+LICENSE.txt reproduces the MIT copyright and permission text in the upstream
+README with plain-text formatting. The original notices are also preserved in
+both C++ source files and UPSTREAM-README.markdown.
+
+Integration: app/src/invite_qr.cpp validates a Tox invitation using the existing
+Core API, encodes its complete canonical tox: URI at medium error correction,
+and returns a row-major black/white module snapshot. It does not contact any
+service. The renderer must add a white quiet zone of at least four modules on
+every side and draw square modules at an integer pixel scale.

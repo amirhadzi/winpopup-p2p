@@ -24,6 +24,42 @@ function Get-VerifiedArchive([string]$Name, [string]$Url, [string]$Hash, [string
     return $archive
 }
 
+function Apply-VerifiedCancelPatch([string]$SourceRoot) {
+    $patchPath = Join-Path $depRoot 'toxcore-idempotent-cancel.patch'
+    $sourcePath = Join-Path $SourceRoot 'toxcore/Messenger.c'
+    $patchHash = '37600a51abb4481df9ceab18d64ffd6e79750ea798693273d036a85a5b4a9643'
+    $originalHash = 'a8978e7f6333ae151c6fac16a3d4094e5fb79160384d99585ec9cc7ecfec6f70'
+    $patchedHash = '85ff7d48aad9b5ffc57018ec3deb3a021d17fdd4f420b64f894628b427239991'
+    if ((Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash -ne $patchHash) {
+        throw 'The Tox cancellation patch checksum does not match. Restore the pinned patch file.'
+    }
+    $currentHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
+    if ($currentHash -eq $patchedHash) { return }
+    if ($currentHash -ne $originalHash) {
+        throw 'Unexpected Messenger.c content. Restore the extracted pinned Tox source before rebuilding.'
+    }
+    # Apply this one verified unified-diff hunk without requiring Git or patch.exe.
+    $lines = [IO.File]::ReadAllLines($patchPath)
+    $before = New-Object System.Collections.Generic.List[string]
+    $after = New-Object System.Collections.Generic.List[string]
+    foreach ($line in $lines[3..($lines.Count - 1)]) {
+        if ($line.StartsWith(' ') -or $line.StartsWith('-')) { $before.Add($line.Substring(1)) }
+        if ($line.StartsWith(' ') -or $line.StartsWith('+')) { $after.Add($line.Substring(1)) }
+    }
+    $old = ($before -join "`n") + "`n"
+    $new = ($after -join "`n") + "`n"
+    $source = [IO.File]::ReadAllText($sourcePath)
+    if ([regex]::Matches($source, [regex]::Escape($old)).Count -ne 1) {
+        throw 'The Tox cancellation patch context is not unique or does not match.'
+    }
+    $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($source.Replace($old, $new))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $actual = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '') } finally { $sha.Dispose() }
+    if ($actual -ne $patchedHash) { throw 'Patched Messenger.c checksum does not match; no source was written.' }
+    [IO.File]::WriteAllBytes($sourcePath, $bytes)
+    Write-Host 'Applied verified Tox idempotent-cancellation patch.'
+}
+
 if (!$VisualStudioPath) {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     if (Test-Path -LiteralPath $vswhere) {
@@ -56,6 +92,7 @@ if (!(Test-Path -LiteralPath (Join-Path $toxRoot 'toxcore/tox.c'))) {
     & tar.exe -xf $toxArchive -C $toxRoot --exclude './other/deploy/apple/LICENSE'
     if ($LASTEXITCODE -ne 0) { throw 'Tox source extraction failed.' }
 }
+Apply-VerifiedCancelPatch $toxRoot
 if (!(Test-Path -LiteralPath (Join-Path $depRoot 'sodium-msvc/libsodium/include/sodium.h'))) {
     Expand-Archive -LiteralPath $sodiumArchive -DestinationPath (Join-Path $depRoot 'sodium-msvc') -Force
 }

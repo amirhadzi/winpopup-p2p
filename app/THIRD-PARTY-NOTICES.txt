@@ -1,9 +1,9 @@
-WinPopup P2P 0.2.0
+WinPopup P2P 0.3.0
 =================
 
 This independent application is distributed under GPL-3.0-or-later.
 See LICENSE.txt for the complete GPL version 3 license. The complete
-corresponding source is supplied in WinPopupP2P-0.2.0-source.zip alongside
+corresponding source is supplied in WinPopupP2P-0.3.0-source.zip alongside
 the binary distribution. There is no warranty; see the license.
 
 The application statically links the following upstream software:
@@ -12,6 +12,9 @@ c-toxcore 0.2.23, including toxencryptsave
   License: GPL-3.0-or-later
   Source: https://github.com/TokTok/c-toxcore/releases/tag/v0.2.23
   License text: licenses/toxcore-GPL-3.0.txt
+  Local modification: deps/toxcore-idempotent-cancel.patch makes cancellation
+  of an already-ended transfer idempotent. See deps/DEPENDENCIES.txt for
+  the reason, exact source hashes and reproducible application of this patch.
 
 CMP, exact source revision bundled in the c-toxcore 0.2.23 source release
   License: MIT
@@ -29,8 +32,16 @@ pthreads4w 3.0.0
   License text: licenses/pthreads4w-Apache-2.0.txt
   Required notices: licenses/pthreads4w-NOTICE.txt
 
-Upstream source inputs are unmodified. Dependency compilation and the
-WinPopup application are described in the matching source package.
+Nayuki QR Code generator 1.8.0 (C++ edition)
+  License: MIT
+  Source: https://github.com/nayuki/QR-Code-generator/releases/tag/v1.8.0
+  Pinned commit: 720f62bddb7226106071d4728c292cb1df519ceb
+  License text: licenses/qrcodegen-MIT.txt
+  Source and hashes: app/third_party/qrcodegen/ in the source package
+
+Upstream archive inputs are unmodified. The Tox build includes the documented
+local cancellation patch; other upstream sources are unmodified. Dependency
+compilation and the application are described in the matching source package.
 The executable includes Microsoft's statically linked C/C++ runtime as
 permitted by the Visual Studio redistributable terms. Windows system
 libraries are supplied by Windows and are not redistributed in this ZIP.

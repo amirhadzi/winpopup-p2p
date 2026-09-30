@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <shellapi.h>
 #include <uxtheme.h>
 #include <dwmapi.h>
@@ -14,15 +15,18 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 #include "core.h"
+#include "invite_qr.h"
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "comdlg32.lib")
 
 namespace {
 constexpr COLORREF FaceColor=RGB(212,208,200), White=RGB(255,255,255), Black=RGB(0,0,0), Dark=RGB(128,128,128), Navy=RGB(0,0,128);
@@ -30,6 +34,8 @@ constexpr UINT TrayMessage=WM_APP+1, PollTimer=1, SmokeTimer=2;
 constexpr int IdSend=101, IdDelete=102, IdPrevious=103, IdNext=104, IdAdd=110, IdCopy=111, IdContacts=112, IdRemove=113;
 constexpr int IdRename=114, IdNetwork=115, IdReconnect=116, IdSent=117, IdPopup=118, IdQuit=119, IdAbout=120, IdShow=121, IdMinimise=122;
 constexpr int IdTo=201, IdMessage=202, IdUser=203, IdGroup=204;
+constexpr int IdInvitation=210, IdCopyQr=211, IdSendFile=212, IdTransfers=213;
+constexpr int IdTransferList=220, IdTransferAccept=221, IdTransferDecline=222, IdTransferCancel=223, IdTransferFolder=224;
 enum class WindowKind { Main, Compose, Dialog };
 HINSTANCE instance;
 int dpi=96, modalDepth=0;
@@ -301,17 +307,28 @@ struct Outgoing {
 struct App {
     HWND window=nullptr,body=nullptr,composeWindow=nullptr,toCombo=nullptr,messageEdit=nullptr,sendOkay=nullptr;
     HWND userRadio=nullptr,groupRadio=nullptr,sendCancel=nullptr,tooltips=nullptr;
+    HWND invitationWindow=nullptr,invitationEdit=nullptr,invitationCopy=nullptr,invitationCopyQr=nullptr,invitationClose=nullptr;
+    HWND transfersWindow=nullptr,transferList=nullptr,transferDetails=nullptr,transferProgress=nullptr;
+    HWND transferAccept=nullptr,transferDecline=nullptr,transferCancel=nullptr,transferFolder=nullptr,transferSend=nullptr,transferClose=nullptr;
+    popup::QrCode invitationQr;std::wstring invitationText;
+    std::vector<popup::FileTransfer> transfers;std::map<uint64_t,std::wstring> transferNames;
+    std::set<uint64_t> acceptingTransfers;uint64_t selectedTransfer=0;
     popup::Core core;std::vector<popup::Contact> contacts;std::deque<Message> inbox;std::deque<Outgoing> outbox;
     std::map<uint32_t,std::wstring> drafts;std::wstring unassignedDraft,recipientText,profilePath,myName,notice;
     int currentMessage=-1,composeContact=-1,unread=0;uint64_t nextOutgoing=1,pendingSend=0;
     popup::Connection connection=popup::Connection::Offline;
     bool preview=false,smoke=false,previewCompose=false,tray=false,processing=false,popupOnMessage=true;
     bool mainActive=true,composeActive=true,updatingCombo=false,typedRecipient=false;UINT taskbarCreated=0;
+    bool invitationActive=true,transfersActive=true,updatingTransfers=false,fileNotification=false;
 };
 App* activeApp=nullptr;
 LRESULT CALLBACK MainProc(HWND,UINT,WPARAM,LPARAM);
 LRESULT CALLBACK ComposeProc(HWND,UINT,WPARAM,LPARAM);
+LRESULT CALLBACK InvitationProc(HWND,UINT,WPARAM,LPARAM);
+LRESULT CALLBACK TransfersProc(HWND,UINT,WPARAM,LPARAM);
 void OpenCompose(App&);void UpdateTray(App&);void RefreshMessage(App&);void FillRecipients(App&);void SendFromComposer(App&);
+void OpenInvitation(App&);void OpenTransfers(App&,bool activate=true);void SendFileDialog(App&);
+void HandleFileEvent(App&,const popup::Event&);void RefreshTransfers(App&);bool ConfirmExit(App&);
 std::wstring ContactName(const popup::Contact& c){return c.name.empty()?L"Contact "+Wide(c.publicKey.substr(0,8)):Wide(c.name);}
 std::wstring ContactLabel(const App& a,const popup::Contact& c){
     auto name=ContactName(c);int matches=0;for(const auto& other:a.contacts)if(_wcsicmp(ContactName(other).c_str(),name.c_str())==0)++matches;
@@ -319,6 +336,353 @@ std::wstring ContactLabel(const App& a,const popup::Contact& c){
 }
 popup::Contact* FindContact(App& a,uint32_t number){for(auto& c:a.contacts)if(c.number==number)return &c;return nullptr;}
 std::wstring ConnectionText(popup::Connection c){return c==popup::Connection::Direct?L"Direct":c==popup::Connection::Relay?L"Relay":L"Offline / connecting";}
+void PaintQr(HDC dc,RECT area,const popup::QrCode& qr){
+    Fill(dc,area,White);
+    if(qr.size<=0||qr.modules.size()!=(size_t)qr.size*(size_t)qr.size)return;
+    int edge=qr.size+2*popup::InvitationQrQuietZone;
+    int scale=std::min((int)(area.right-area.left),(int)(area.bottom-area.top))/edge;
+    if(scale<1)return;
+    int x=area.left+((area.right-area.left)-edge*scale)/2+popup::InvitationQrQuietZone*scale;
+    int y=area.top+((area.bottom-area.top)-edge*scale)/2+popup::InvitationQrQuietZone*scale;
+    HBRUSH black=CreateSolidBrush(Black);
+    for(int row=0;row<qr.size;++row)for(int col=0;col<qr.size;++col)if(qr.Module(col,row)){
+        RECT cell{x+col*scale,y+row*scale,x+(col+1)*scale,y+(row+1)*scale};FillRect(dc,&cell,black);
+    }
+    DeleteObject(black);
+}
+std::vector<uint8_t> QrClipboardDib(const popup::QrCode& qr){
+    if(qr.size<=0||qr.size>177||qr.modules.size()!=(size_t)qr.size*(size_t)qr.size)return {};
+    constexpr int scale=6;int edge=(qr.size+2*popup::InvitationQrQuietZone)*scale;
+    BITMAPINFOHEADER header{};header.biSize=sizeof(header);header.biWidth=edge;header.biHeight=edge;
+    header.biPlanes=1;header.biBitCount=32;header.biCompression=BI_RGB;header.biSizeImage=(DWORD)(edge*edge*4);
+    std::vector<uint8_t> dib(sizeof(header)+header.biSizeImage,0);memcpy(dib.data(),&header,sizeof(header));
+    for(int y=0;y<edge;++y)for(int x=0;x<edge;++x){
+        int col=x/scale-popup::InvitationQrQuietZone,row=y/scale-popup::InvitationQrQuietZone;
+        uint8_t value=col>=0&&row>=0&&col<qr.size&&row<qr.size&&qr.Module(col,row)?0:255;
+        size_t offset=sizeof(header)+((size_t)(edge-1-y)*edge+x)*4;
+        dib[offset]=dib[offset+1]=dib[offset+2]=value;
+    }
+    return dib;
+}
+bool CopyQr(HWND owner,const popup::QrCode& qr){
+    auto dib=QrClipboardDib(qr);if(dib.empty()||!OpenClipboard(owner))return false;
+    HGLOBAL memory=GlobalAlloc(GMEM_MOVEABLE,dib.size());
+    if(!memory){CloseClipboard();return false;}
+    void* target=GlobalLock(memory);if(!target){GlobalFree(memory);CloseClipboard();return false;}
+    memcpy(target,dib.data(),dib.size());GlobalUnlock(memory);EmptyClipboard();
+    bool okay=SetClipboardData(CF_DIB,memory)!=nullptr;if(!okay)GlobalFree(memory);CloseClipboard();return okay;
+}
+void LayoutInvitation(App& a){
+    if(!a.invitationWindow)return;RECT r;GetClientRect(a.invitationWindow,&r);
+    Place(a.invitationEdit,S(252),S(76),r.right-S(266),S(76));
+    Place(a.invitationCopy,S(252),r.bottom-S(38),S(82),S(23));
+    Place(a.invitationCopyQr,S(342),r.bottom-S(38),S(82),S(23));
+    Place(a.invitationClose,r.right-S(86),r.bottom-S(38),S(72),S(23));
+    InvalidateRect(a.invitationWindow,nullptr,TRUE);
+}
+void PaintInvitation(App& a,HDC dc,RECT r){
+    PaintClassicFrame(dc,r,L"My Invitation",a.invitationActive,WindowKind::Dialog,(int)(INT_PTR)GetPropW(a.invitationWindow,L"PressedAction"));
+    Text(dc,L"Share this invitation with a friend to connect on Tox.",{S(12),S(34),r.right-S(12),S(50)});
+    PaintQr(dc,{S(12),S(58),S(238),S(284)},a.invitationQr);
+    Text(dc,L"My Tox ID:",{S(252),S(58),r.right-S(14),S(72)});
+    Text(dc,L"The QR code contains this complete Tox invitation. Scan it with a compatible Tox client, or copy and share the ID.",
+        {S(252),S(166),r.right-S(14),S(222)},font,Black,DT_WORDBREAK|DT_NOPREFIX);
+    Text(dc,L"Keep your profile file and password private.",{S(252),S(231),r.right-S(14),S(264)},font,Black,DT_WORDBREAK|DT_NOPREFIX);
+}
+LRESULT CALLBACK InvitationProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
+    App* a=(App*)GetWindowLongPtrW(w,GWLP_USERDATA);
+    if(m==WM_NCCREATE){a=(App*)((CREATESTRUCTW*)lp)->lpCreateParams;a->invitationWindow=w;SetWindowLongPtrW(w,GWLP_USERDATA,(LONG_PTR)a);RememberWindow(w,WindowKind::Dialog);}
+    if(!a)return DefWindowProcW(w,m,wp,lp);
+    switch(m){
+    case WM_NCCALCSIZE:case WM_NCPAINT:return 0;case WM_NCACTIVATE:return TRUE;
+    case WM_NCHITTEST:return ClassicHitTest(w,lp,WindowKind::Dialog);
+    case WM_LBUTTONDOWN:if(BeginClick(w,lp,WindowKind::Dialog))return 0;break;
+    case WM_LBUTTONUP:if(EndClick(w,lp,WindowKind::Dialog)&&CaptionClick(w,lp,WindowKind::Dialog))return 0;break;
+    case WM_CAPTURECHANGED:RemovePropW(w,L"PressedAction");InvalidateRect(w,nullptr,FALSE);return 0;
+    case WM_CREATE:
+        a->invitationEdit=Child(w,L"EDIT",a->invitationText.c_str(),WS_TABSTOP|ES_MULTILINE|ES_READONLY,300,WS_EX_CLIENTEDGE);
+        a->invitationCopy=Child(w,L"BUTTON",L"&Copy ID",WS_TABSTOP|BS_OWNERDRAW,IdCopy);
+        a->invitationCopyQr=Child(w,L"BUTTON",L"Copy &QR",WS_TABSTOP|BS_OWNERDRAW,IdCopyQr);
+        a->invitationClose=Child(w,L"BUTTON",L"Close",WS_TABSTOP|BS_OWNERDRAW,IDCANCEL);LayoutInvitation(*a);return 0;
+    case WM_SIZE:LayoutInvitation(*a);return 0;
+    case WM_ACTIVATE:a->invitationActive=LOWORD(wp)!=WA_INACTIVE;InvalidateRect(w,nullptr,FALSE);return 0;
+    case WM_DPICHANGED:ChangeDpi(w,HIWORD(wp),*(RECT*)lp);return 0;
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT:{PAINTSTRUCT p;HDC dc=BeginPaint(w,&p);RECT r;GetClientRect(w,&r);PaintInvitation(*a,dc,r);EndPaint(w,&p);return 0;}
+    case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:SetBkColor((HDC)wp,White);SetTextColor((HDC)wp,Black);return (LRESULT)whiteBrush;
+    case WM_DRAWITEM:PaintButton((DRAWITEMSTRUCT*)lp);return TRUE;
+    case WM_COMMAND:
+        if(LOWORD(wp)==IDCANCEL)DestroyWindow(w);
+        else if(LOWORD(wp)==IdCopy){if(!CopyText(w,a->invitationText))Alert(w,L"Copy Invitation",L"The clipboard is busy. Please try again.");}
+        else if(LOWORD(wp)==IdCopyQr){if(!CopyQr(w,a->invitationQr))Alert(w,L"Copy QR Code",L"The QR code could not be copied. Please try again.");}
+        return 0;
+    case WM_SYSKEYDOWN:if(wp==VK_SPACE){SystemMenu(w);return 0;}break;
+    case WM_CLOSE:DestroyWindow(w);return 0;
+    case WM_DESTROY:ForgetWindow(w);a->invitationWindow=a->invitationEdit=a->invitationCopy=a->invitationCopyQr=a->invitationClose=nullptr;return 0;
+    }
+    return DefWindowProcW(w,m,wp,lp);
+}
+void OpenInvitation(App& a){
+    if(a.invitationWindow){ShowWindow(a.invitationWindow,SW_RESTORE);SetForegroundWindow(a.invitationWindow);return;}
+    std::string address=a.core.Address(),error;
+    if(!popup::MakeInvitationQr(address,a.invitationQr,error)){Alert(a.window,L"My Invitation",address.empty()?L"Unlock a profile to view its invitation. Preview mode does not open a profile.":Wide(error));return;}
+    a.invitationText=L"tox:"+Wide(address);RECT r;GetWindowRect(a.window,&r);
+    HWND w=CreateWindowExW(WS_EX_CONTROLPARENT,L"WinPopupInvitation",L"My Invitation",WS_POPUP|WS_SYSMENU|WS_CLIPCHILDREN,
+        r.left+S(30),r.top+S(35),S(560),S(318),a.window,nullptr,instance,&a);
+    if(w){ShowWindow(w,SW_SHOW);SetForegroundWindow(w);SetFocus(a.invitationEdit);}
+}
+bool TerminalFile(popup::FileState state){
+    return state==popup::FileState::Completed||state==popup::FileState::Cancelled||state==popup::FileState::Failed;
+}
+std::wstring FileSizeText(uint64_t bytes){
+    if(bytes<1024)return std::to_wstring(bytes)+L" bytes";
+    wchar_t value[64]{};double amount=(double)bytes;
+    if(bytes<1024*1024)swprintf_s(value,L"%.1f KB",amount/1024.0);
+    else if(bytes<1024ULL*1024*1024)swprintf_s(value,L"%.1f MB",amount/(1024.0*1024));
+    else swprintf_s(value,L"%.2f GB",amount/(1024.0*1024*1024));
+    return value;
+}
+std::wstring FileStatus(const popup::FileTransfer& transfer){
+    switch(transfer.state){
+    case popup::FileState::Offered:return transfer.direction==popup::FileDirection::Incoming?L"Awaiting your acceptance":L"Awaiting acceptance";
+    case popup::FileState::Transferring:return transfer.direction==popup::FileDirection::Incoming?L"Receiving":L"Sending";
+    case popup::FileState::Paused:return L"Paused";
+    case popup::FileState::Completed:return transfer.direction==popup::FileDirection::Incoming?L"Saved":L"Sent to peer";
+    case popup::FileState::Cancelled:return L"Cancelled";
+    case popup::FileState::Failed:return L"Failed";
+    }
+    return L"Unknown";
+}
+std::wstring FileKind(const std::wstring& name){
+    auto dot=name.find_last_of(L'.');if(dot==std::wstring::npos)return L"File";
+    auto ext=name.substr(dot);const wchar_t* images[]={L".jpg",L".jpeg",L".png",L".gif",L".bmp",L".webp",L".tif",L".tiff",L".heic",L".heif",L".avif"};
+    for(const auto* image:images)if(_wcsicmp(ext.c_str(),image)==0)return L"Image";return L"File";
+}
+popup::FileTransfer* SelectedFile(App& a){
+    for(auto& transfer:a.transfers)if(transfer.token==a.selectedTransfer)return &transfer;return nullptr;
+}
+void UpsertTransfer(App& a,const popup::FileTransfer& transfer){
+    if(!transfer.token)return;
+    if(a.transferNames.find(transfer.token)==a.transferNames.end()){
+        auto contact=FindContact(a,transfer.contact);
+        a.transferNames[transfer.token]=contact&&contact->publicKey==transfer.publicKey?ContactLabel(a,*contact):L"Contact "+Wide(transfer.publicKey.substr(0,8));
+    }
+    bool found=false;for(auto& current:a.transfers)if(current.token==transfer.token){current=transfer;found=true;break;}
+    if(!found)a.transfers.push_back(transfer);
+    while(a.transfers.size()>128){
+        auto oldest=std::find_if(a.transfers.begin(),a.transfers.end(),[](const popup::FileTransfer& t){return TerminalFile(t.state);});
+        if(oldest==a.transfers.end())break;
+        a.transferNames.erase(oldest->token);a.acceptingTransfers.erase(oldest->token);a.transfers.erase(oldest);
+    }
+}
+void UpdateTransferDetails(App& a){
+    if(!a.transfersWindow)return;auto transfer=SelectedFile(a);
+    bool incoming=transfer&&transfer->direction==popup::FileDirection::Incoming;
+    bool offered=incoming&&transfer->state==popup::FileState::Offered;
+    bool busy=transfer&&a.acceptingTransfers.count(transfer->token)!=0;
+    EnableWindow(a.transferAccept,offered&&!busy);EnableWindow(a.transferDecline,offered&&!busy);
+    EnableWindow(a.transferCancel,transfer&&!TerminalFile(transfer->state));
+    EnableWindow(a.transferFolder,incoming&&transfer->state==popup::FileState::Completed&&!transfer->path.empty());
+    std::wstring detail=L"Select a transfer to see its details. Incoming files require your acceptance and a new save filename.";
+    int progress=0;
+    if(transfer){
+        detail=FileKind(Wide(transfer->name))+L": "+Wide(transfer->name)+L"\r\n"+
+            (incoming?L"From ":L"To ")+a.transferNames[transfer->token]+L" - "+FileStatus(*transfer)+L"\r\n"+
+            FileSizeText(transfer->transferred)+L" of "+FileSizeText(transfer->size);
+        if(busy)detail+=L" - preparing your save destination";
+        if(!transfer->detail.empty())detail+=L"\r\n"+Wide(transfer->detail);
+        if(incoming&&transfer->state==popup::FileState::Completed)detail+=L"\r\nSaved to: "+transfer->path;
+        if(transfer->state==popup::FileState::Completed)progress=1000;
+        else if(transfer->size)progress=(int)((long double)std::min(transfer->transferred,transfer->size)*1000/transfer->size);
+    }
+    SetWindowTextW(a.transferDetails,detail.c_str());SendMessageW(a.transferProgress,PBM_SETPOS,progress,0);
+}
+void RefreshTransfers(App& a){
+    if(!a.transferList||!IsWindow(a.transferList))return;
+    if(!SelectedFile(a))a.selectedTransfer=a.transfers.empty()?0:a.transfers.back().token;
+    int top=ListView_GetTopIndex(a.transferList);a.updatingTransfers=true;SendMessageW(a.transferList,WM_SETREDRAW,FALSE,0);
+    ListView_DeleteAllItems(a.transferList);
+    for(size_t i=0;i<a.transfers.size();++i){
+        const auto& transfer=a.transfers[i];auto name=Wide(transfer.name);
+        LVITEMW item{};item.mask=LVIF_TEXT|LVIF_PARAM;item.iItem=(int)i;item.pszText=name.data();item.lParam=(LPARAM)transfer.token;
+        int row=(int)SendMessageW(a.transferList,LVM_INSERTITEMW,0,(LPARAM)&item);
+        std::wstring amount=FileSizeText(transfer.size),progress;
+        if(transfer.state==popup::FileState::Completed)progress=L"100%";
+        else if(transfer.size)progress=std::to_wstring((int)((long double)std::min(transfer.transferred,transfer.size)*100/transfer.size))+L"%";
+        else progress=L"0%";
+        std::wstring values[]={a.transferNames[transfer.token],transfer.direction==popup::FileDirection::Incoming?L"Receive":L"Send",amount,progress,FileStatus(transfer)};
+        for(int col=0;col<5;++col){LVITEMW cell{};cell.iSubItem=col+1;cell.pszText=values[col].data();SendMessageW(a.transferList,LVM_SETITEMTEXTW,row,(LPARAM)&cell);}
+        if(transfer.token==a.selectedTransfer)ListView_SetItemState(a.transferList,row,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED);
+    }
+    if(top>0&&!a.transfers.empty())ListView_EnsureVisible(a.transferList,std::min(top,(int)a.transfers.size()-1),FALSE);
+    SendMessageW(a.transferList,WM_SETREDRAW,TRUE,0);InvalidateRect(a.transferList,nullptr,TRUE);a.updatingTransfers=false;
+    UpdateTransferDetails(a);
+}
+void LayoutTransfers(App& a){
+    if(!a.transfersWindow)return;RECT r;GetClientRect(a.transfersWindow,&r);
+    Place(a.transferList,S(12),S(54),r.right-S(24),r.bottom-S(228));
+    int widths[]={225,125,60,80,75,135};for(int col=0;col<6;++col)ListView_SetColumnWidth(a.transferList,col,S(widths[col]));
+    Place(a.transferDetails,S(12),r.bottom-S(166),r.right-S(24),S(69));
+    Place(a.transferProgress,S(12),r.bottom-S(85),r.right-S(24),S(16));
+    Place(a.transferSend,S(12),r.bottom-S(42),S(94),S(23));
+    Place(a.transferAccept,S(116),r.bottom-S(42),S(76),S(23));
+    Place(a.transferDecline,S(200),r.bottom-S(42),S(76),S(23));
+    Place(a.transferCancel,S(284),r.bottom-S(42),S(88),S(23));
+    Place(a.transferFolder,S(382),r.bottom-S(42),S(100),S(23));
+    Place(a.transferClose,r.right-S(88),r.bottom-S(42),S(76),S(23));InvalidateRect(a.transfersWindow,nullptr,TRUE);
+}
+void PaintTransfers(App& a,HDC dc,RECT r){
+    PaintClassicFrame(dc,r,L"File Transfers",a.transfersActive,WindowKind::Dialog,(int)(INT_PTR)GetPropW(a.transfersWindow,L"PressedAction"));
+    Text(dc,L"Images and files use encrypted Tox transfers. Both contacts must stay online.",{S(12),S(34),r.right-S(12),S(49)});
+    Text(dc,L"Files are never opened automatically. Sent to peer does not mean opened or read.",
+        {S(12),r.bottom-S(62),r.right-S(12),r.bottom-S(47)},font,Black,DT_SINGLELINE|DT_NOPREFIX);
+}
+std::wstring SuggestedFileName(const std::string& name){
+    std::wstring value=Wide(name);auto slash=value.find_last_of(L"\\/");if(slash!=std::wstring::npos)value=value.substr(slash+1);
+    for(auto& ch:value)if(ch<32||wcschr(L"<>:\"/\\|?*",ch))ch=L'_';
+    while(!value.empty()&&(value.back()==L'.'||value.back()==L' '))value.pop_back();
+    if(value.empty()||value==L"."||value==L"..")value=L"received-file";
+    if(value.size()>240)value.resize(240);return value;
+}
+bool ChooseNewDestination(HWND owner,const popup::FileTransfer& transfer,std::wstring& destination){
+    std::vector<wchar_t> path(32768,0);auto name=SuggestedFileName(transfer.name);wcsncpy_s(path.data(),path.size(),name.c_str(),_TRUNCATE);
+    for(;;){
+        OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;
+        dialog.lpstrFilter=L"All files\0*.*\0\0";dialog.lpstrFile=path.data();dialog.nMaxFile=(DWORD)path.size();
+        dialog.lpstrTitle=L"Accept File - Choose a New Save Filename";
+        dialog.Flags=OFN_EXPLORER|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_NOREADONLYRETURN;
+        ++modalDepth;BOOL chosen=GetSaveFileNameW(&dialog);--modalDepth;
+        if(!chosen){if(CommDlgExtendedError())Alert(owner,L"Save File",L"Windows could not open the save dialog. Please try again.");return false;}
+        if(GetFileAttributesW(path.data())!=INVALID_FILE_ATTRIBUTES){Alert(owner,L"Choose a New Filename",L"That file already exists. Choose a different name. WinPopup never replaces an existing file.");continue;}
+        destination=path.data();return true;
+    }
+}
+void AcceptSelectedFile(App& a){
+    auto selected=SelectedFile(a);if(!selected||selected->direction!=popup::FileDirection::Incoming||selected->state!=popup::FileState::Offered)return;
+    if(a.acceptingTransfers.count(selected->token))return;
+    popup::FileTransfer transfer=*selected;std::wstring destination;
+    if(!ChooseNewDestination(a.transfersWindow,transfer,destination))return;
+    a.acceptingTransfers.insert(transfer.token);UpdateTransferDetails(a);a.core.AcceptFile(transfer.token,destination);
+}
+void ShowTransferFolder(App& a){
+    auto transfer=SelectedFile(a);if(!transfer||transfer->direction!=popup::FileDirection::Incoming||transfer->state!=popup::FileState::Completed||transfer->path.empty())return;
+    auto slash=transfer->path.find_last_of(L"\\/");if(slash==std::wstring::npos)return;
+    auto folder=transfer->path.substr(0,slash+1);DWORD attributes=GetFileAttributesW(folder.c_str());
+    if(attributes==INVALID_FILE_ATTRIBUTES||!(attributes&FILE_ATTRIBUTE_DIRECTORY)){Alert(a.transfersWindow,L"Show Folder",L"The saved file's folder is no longer available.");return;}
+    if((INT_PTR)ShellExecuteW(a.transfersWindow,L"open",folder.c_str(),nullptr,nullptr,SW_SHOWNORMAL)<=32)
+        Alert(a.transfersWindow,L"Show Folder",L"Windows could not open this folder. The saved path is shown in the transfer details.");
+}
+void SendFileDialog(App& a){
+    HWND owner=a.transfersWindow?a.transfersWindow:a.window;
+    if(a.contacts.empty()){Alert(owner,L"Send File",L"Add a contact first using Messages > Contacts > Add Contact.");return;}
+    auto contacts=a.contacts;Form form;form.owner=owner;form.title=L"Send File or Image";
+    form.description=L"Choose the contact who should receive your file. They will choose whether to accept it.";
+    Field field;field.label=L"To:";
+    for(size_t i=0;i<contacts.size();++i){field.choices.push_back(ContactLabel(a,contacts[i])+L" - "+ConnectionText(contacts[i].connection));if((int)contacts[i].number==a.composeContact)field.selected=(int)i;}
+    form.fields.push_back(field);form.action=L"Choose File";
+    form.note=L"Both people must be online. Images are sent as files. Maximum size: "+FileSizeText(popup::Core::MaxFileBytes())+L".";
+    if(!ShowForm(form)||form.fields[0].selected<0||form.fields[0].selected>=(int)contacts.size())return;
+    auto contact=contacts[(size_t)form.fields[0].selected];
+    if(contact.connection==popup::Connection::Offline){Alert(owner,L"Send File",L"This contact is offline. Connect with them before sending a file.");return;}
+    std::vector<wchar_t> path(32768,0);OPENFILENAMEW dialog{};dialog.lStructSize=sizeof(dialog);dialog.hwndOwner=owner;
+    dialog.lpstrFilter=L"All files\0*.*\0Images\0*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.tif;*.tiff;*.heic;*.heif;*.avif\0\0";
+    dialog.lpstrFile=path.data();dialog.nMaxFile=(DWORD)path.size();dialog.lpstrTitle=L"Send File or Image";
+    dialog.Flags=OFN_EXPLORER|OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR|OFN_HIDEREADONLY;
+    ++modalDepth;BOOL chosen=GetOpenFileNameW(&dialog);--modalDepth;
+    if(!chosen){if(CommDlgExtendedError())Alert(owner,L"Send File",L"Windows could not open the file picker. Please try again.");return;}
+    auto current=a.core.Contacts();
+    auto peer=std::find_if(current.begin(),current.end(),[&contact](const popup::Contact& candidate){return candidate.number==contact.number&&candidate.publicKey==contact.publicKey;});
+    if(peer==current.end()||peer->connection==popup::Connection::Offline){Alert(owner,L"Send File",L"This contact is no longer connected. Your file has not been sent.");return;}
+    uint64_t token=a.core.SendFile(contact.number,path.data(),contact.publicKey);
+    if(!token){Alert(owner,L"Send File",L"The file could not be queued. Please try again.");return;}
+    a.selectedTransfer=token;a.transferNames[token]=ContactLabel(a,contact);OpenTransfers(a,true);
+}
+LRESULT CALLBACK TransfersProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
+    App* a=(App*)GetWindowLongPtrW(w,GWLP_USERDATA);
+    if(m==WM_NCCREATE){a=(App*)((CREATESTRUCTW*)lp)->lpCreateParams;a->transfersWindow=w;SetWindowLongPtrW(w,GWLP_USERDATA,(LONG_PTR)a);RememberWindow(w,WindowKind::Dialog);}
+    if(!a)return DefWindowProcW(w,m,wp,lp);
+    switch(m){
+    case WM_NCCALCSIZE:case WM_NCPAINT:return 0;case WM_NCACTIVATE:return TRUE;
+    case WM_NCHITTEST:return ClassicHitTest(w,lp,WindowKind::Dialog);
+    case WM_LBUTTONDOWN:if(BeginClick(w,lp,WindowKind::Dialog))return 0;break;
+    case WM_LBUTTONUP:if(EndClick(w,lp,WindowKind::Dialog)&&CaptionClick(w,lp,WindowKind::Dialog))return 0;break;
+    case WM_CAPTURECHANGED:RemovePropW(w,L"PressedAction");InvalidateRect(w,nullptr,FALSE);return 0;
+    case WM_CREATE:{
+        a->transferList=Child(w,WC_LISTVIEWW,L"File transfers",WS_TABSTOP|WS_BORDER|LVS_REPORT|LVS_SINGLESEL|LVS_SHOWSELALWAYS,IdTransferList);
+        ListView_SetExtendedListViewStyle(a->transferList,LVS_EX_FULLROWSELECT|LVS_EX_DOUBLEBUFFER);
+        const wchar_t* headings[]={L"File",L"Contact",L"Direction",L"Size",L"Progress",L"Status"};
+        for(int i=0;i<6;++i){LVCOLUMNW col{};col.mask=LVCF_TEXT|LVCF_WIDTH;col.pszText=const_cast<wchar_t*>(headings[i]);col.cx=S(100);SendMessageW(a->transferList,LVM_INSERTCOLUMNW,i,(LPARAM)&col);}
+        a->transferDetails=Child(w,L"EDIT",L"",WS_TABSTOP|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL|WS_VSCROLL,230);
+        a->transferProgress=Child(w,PROGRESS_CLASSW,L"Transfer progress",0,231);SendMessageW(a->transferProgress,PBM_SETRANGE32,0,1000);
+        SendMessageW(a->transferProgress,PBM_SETBARCOLOR,0,Navy);
+        a->transferSend=Child(w,L"BUTTON",L"Send &File...",WS_TABSTOP|BS_OWNERDRAW,IdSendFile);
+        a->transferAccept=Child(w,L"BUTTON",L"&Accept...",WS_TABSTOP|BS_OWNERDRAW,IdTransferAccept);
+        a->transferDecline=Child(w,L"BUTTON",L"&Decline",WS_TABSTOP|BS_OWNERDRAW,IdTransferDecline);
+        a->transferCancel=Child(w,L"BUTTON",L"&Cancel Transfer",WS_TABSTOP|BS_OWNERDRAW,IdTransferCancel);
+        a->transferFolder=Child(w,L"BUTTON",L"Show F&older",WS_TABSTOP|BS_OWNERDRAW,IdTransferFolder);
+        a->transferClose=Child(w,L"BUTTON",L"Close",WS_TABSTOP|BS_OWNERDRAW,IDCANCEL);
+        LayoutTransfers(*a);RefreshTransfers(*a);return 0;
+    }
+    case WM_SIZE:LayoutTransfers(*a);return 0;
+    case WM_ACTIVATE:a->transfersActive=LOWORD(wp)!=WA_INACTIVE;InvalidateRect(w,nullptr,FALSE);return 0;
+    case WM_DPICHANGED:ChangeDpi(w,HIWORD(wp),*(RECT*)lp);return 0;
+    case WM_ERASEBKGND:return 1;
+    case WM_PAINT:{PAINTSTRUCT p;HDC dc=BeginPaint(w,&p);RECT r;GetClientRect(w,&r);PaintTransfers(*a,dc,r);EndPaint(w,&p);return 0;}
+    case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:SetBkColor((HDC)wp,FaceColor);SetTextColor((HDC)wp,Black);return (LRESULT)faceBrush;
+    case WM_DRAWITEM:PaintButton((DRAWITEMSTRUCT*)lp);return TRUE;
+    case WM_NOTIFY:
+        if(((NMHDR*)lp)->hwndFrom==a->transferList&&((NMHDR*)lp)->code==LVN_ITEMCHANGED&&!a->updatingTransfers){
+            auto change=(NMLISTVIEW*)lp;if(change->uNewState&LVIS_SELECTED){a->selectedTransfer=(uint64_t)change->lParam;UpdateTransferDetails(*a);}
+        }return 0;
+    case WM_COMMAND:
+        switch(LOWORD(wp)){
+        case IDCANCEL:DestroyWindow(w);break;
+        case IdSendFile:SendFileDialog(*a);break;
+        case IdTransferAccept:AcceptSelectedFile(*a);break;
+        case IdTransferDecline:case IdTransferCancel:{auto selected=SelectedFile(*a);if(selected&&!TerminalFile(selected->state))a->core.CancelFile(selected->token);break;}
+        case IdTransferFolder:ShowTransferFolder(*a);break;
+        }return 0;
+    case WM_SYSKEYDOWN:if(wp==VK_SPACE){SystemMenu(w);return 0;}break;
+    case WM_CLOSE:DestroyWindow(w);return 0;
+    case WM_DESTROY:
+        ForgetWindow(w);a->transfersWindow=a->transferList=a->transferDetails=a->transferProgress=nullptr;
+        a->transferSend=a->transferAccept=a->transferDecline=a->transferCancel=a->transferFolder=a->transferClose=nullptr;return 0;
+    }
+    return DefWindowProcW(w,m,wp,lp);
+}
+void OpenTransfers(App& a,bool activate){
+    if(!a.preview)for(const auto& transfer:a.core.Transfers())UpsertTransfer(a,transfer);
+    if(a.transfersWindow){RefreshTransfers(a);ShowWindow(a.transfersWindow,activate?SW_RESTORE:SW_SHOWNOACTIVATE);if(activate)SetForegroundWindow(a.transfersWindow);return;}
+    RECT r;GetWindowRect(a.window,&r);
+    HWND w=CreateWindowExW(WS_EX_CONTROLPARENT,L"WinPopupTransfers",L"File Transfers",WS_POPUP|WS_SYSMENU|WS_CLIPCHILDREN,
+        r.left+S(25),r.top+S(40),S(760),S(398),a.window,nullptr,instance,&a);
+    if(w){ShowWindow(w,activate?SW_SHOW:SW_SHOWNOACTIVATE);if(activate){SetForegroundWindow(w);SetFocus(a.transferList);}}
+}
+void HandleFileEvent(App& a,const popup::Event& event){
+    UpsertTransfer(a,event.transfer);a.acceptingTransfers.erase(event.transfer.token);
+    if(event.type==popup::EventType::FileOffer)a.selectedTransfer=event.transfer.token;
+    RefreshTransfers(a);UpdateTray(a);
+    if(a.preview||!a.window)return;
+    if(event.type==popup::EventType::FileOffer)OpenTransfers(a,a.popupOnMessage);
+    if(event.type==popup::EventType::FileOffer||event.type==popup::EventType::FileFinished){
+        a.fileNotification=true;
+        if(GetForegroundWindow()!=a.transfersWindow){
+            NOTIFYICONDATAW data{};data.cbSize=sizeof(data);data.hWnd=a.window;data.uID=1;data.uFlags=NIF_INFO;data.dwInfoFlags=NIIF_INFO|NIIF_RESPECT_QUIET_TIME;
+            wcscpy_s(data.szInfoTitle,L"WinPopup File Transfer");
+            auto text=event.type==popup::EventType::FileOffer?a.transferNames[event.transfer.token]+L" offered you a file.":FileStatus(event.transfer)+L". Open File Transfers for details.";
+            wcsncpy_s(data.szInfo,text.c_str(),_TRUNCATE);Shell_NotifyIconW(NIM_MODIFY,&data);
+        }
+    }
+}
+bool ConfirmExit(App& a){
+    if(a.preview)return true;
+    auto live=a.core.Transfers();bool active=std::any_of(live.begin(),live.end(),[](const popup::FileTransfer& transfer){return !TerminalFile(transfer.state);});
+    if(!active)return true;
+    Form form;form.owner=a.window;form.title=L"Exit WinPopup";form.action=L"Exit";
+    form.description=L"File transfers or offers are still active. Exiting WinPopup cancels them.";
+    form.note=L"Closing only the File Transfers window keeps transfers running. Incomplete received files will not be kept.";
+    return ShowForm(form);
+}
 std::wstring Timestamp(){
     SYSTEMTIME t;GetLocalTime(&t);wchar_t date[40]{},clock[40]{};
     GetDateFormatEx(LOCALE_NAME_USER_DEFAULT,DATE_SHORTDATE,&t,nullptr,date,40,nullptr);
@@ -427,17 +791,20 @@ void UpdateTray(App& a){
     d.hIcon=(HICON)LoadImageW(instance,MAKEINTRESOURCEW(101),IMAGE_ICON,0,0,LR_DEFAULTSIZE|LR_SHARED);
     if(!d.hIcon)d.hIcon=LoadIconW(nullptr,IDI_APPLICATION);
     auto tip=L"WinPopup"+(a.unread?L" - "+std::to_wstring(a.unread)+L" new messages":L"");
+    size_t offers=0;for(const auto& transfer:a.transfers)if(transfer.direction==popup::FileDirection::Incoming&&transfer.state==popup::FileState::Offered)++offers;
+    if(offers)tip+=L" - "+std::to_wstring(offers)+L" file offers";
     wcsncpy_s(d.szTip,tip.c_str(),_TRUNCATE);
     if(!a.tray)a.tray=Shell_NotifyIconW(NIM_ADD,&d)!=FALSE;else Shell_NotifyIconW(NIM_MODIFY,&d);
 }
 void ShowApp(App& a){ShowWindow(a.window,SW_RESTORE);SetForegroundWindow(a.window);a.unread=0;UpdateTray(a);}
 void NotifyMessage(App& a,const std::wstring& from){
-    if(a.preview)return;UpdateTray(a);NOTIFYICONDATAW d{};d.cbSize=sizeof(d);d.hWnd=a.window;d.uID=1;d.uFlags=NIF_INFO;d.dwInfoFlags=NIIF_INFO|NIIF_RESPECT_QUIET_TIME;
+    if(a.preview)return;a.fileNotification=false;UpdateTray(a);NOTIFYICONDATAW d{};d.cbSize=sizeof(d);d.hWnd=a.window;d.uID=1;d.uFlags=NIF_INFO;d.dwInfoFlags=NIIF_INFO|NIIF_RESPECT_QUIET_TIME;
     wcscpy_s(d.szInfoTitle,L"WinPopup");auto body=L"Message from "+from;wcsncpy_s(d.szInfo,body.c_str(),_TRUNCATE);Shell_NotifyIconW(NIM_MODIFY,&d);
     FLASHWINFO flash{sizeof(flash),a.window,FLASHW_TRAY|FLASHW_TIMERNOFG,3,0};FlashWindowEx(&flash);
 }
 void HandleEvent(App& a,const popup::Event& e){
     switch(e.type){
+    case popup::EventType::FileOffer:case popup::EventType::FileProgress:case popup::EventType::FileFinished:HandleFileEvent(a,e);break;
     case popup::EventType::Network:a.connection=e.connection;break;
     case popup::EventType::Contacts:a.contacts=a.core.Contacts();FillRecipients(a);break;
     case popup::EventType::Message:{
@@ -466,6 +833,7 @@ void HandleEvent(App& a,const popup::Event& e){
             sent.delivery=Delivery::Delivered;break;
         }break;
     case popup::EventType::Error:
+        if(e.key=="file"){a.acceptingTransfers.clear();UpdateTransferDetails(a);}
         if(e.key=="send")for(auto& sent:a.outbox)if(sent.contact==e.contact&&sent.delivery==Delivery::Pending){
             sent.delivery=Delivery::Failed;if(sent.id==a.pendingSend){a.pendingSend=0;SetComposePending(a,false);}break;
         }
@@ -528,7 +896,7 @@ void SentDialog(App& a){
     if(text.empty())text=L"No messages sent this session.";text+=L"\r\nDelivered means received by the other device, not read by a person.";Alert(a.window,L"Sent Messages",text);
 }
 void About(App& a,HWND owner=nullptr){
-    Alert(owner?owner:a.window,L"About WinPopup",L"WinPopup P2P 0.2.0\r\nClassic Windows messaging over Tox.\r\n\r\nBoth people must be online. Exchange Tox invitations using Messages > Contacts. Workgroup broadcast is not supported.\r\n\r\nMessages are end-to-end encrypted. Public Tox discovery and relay nodes help connect peers; those nodes and your contacts can learn IP addresses and connection metadata. This is not an anonymity service.\r\n\r\nMessages, sent status and drafts stay in memory for this session. Up to 200 incoming and 200 outgoing messages are retained. No plaintext message log is written.\r\n\r\nMinimise to the tray. Closing WinPopup quits. Back up the app folder while closed, and keep your profile password: there is no password recovery.");
+    Alert(owner?owner:a.window,L"About WinPopup",L"WinPopup P2P 0.3.0\r\nClassic Windows messaging over Tox.\r\n\r\nBoth people must be online. Exchange Tox invitations or QR codes using Messages > Contacts. Workgroup broadcast is not supported.\r\n\r\nMessages and file transfers are end-to-end encrypted. Public Tox discovery and relay nodes help connect peers; those nodes and your contacts can learn IP addresses and connection metadata. This is not an anonymity service.\r\n\r\nImages are sent as ordinary files. Incoming files require acceptance and a new save filename. Files are never opened automatically. Sent to peer does not mean opened or read.\r\n\r\nMessages, transfer status and drafts stay in memory for this session. No plaintext message log is written. Received files are saved only where you explicitly choose.\r\n\r\nMinimise to the tray. Closing WinPopup quits. Back up the app folder while closed, and keep your profile password: there is no password recovery.");
 }
 void NetworkDialog(App& a){
     Alert(a.window,L"Network",L"Tox network: "+ConnectionText(a.connection)+L"\r\n\r\nDirect means a direct network connection. Relay means encrypted traffic is passing through a Tox relay. A contact can use a different route.\r\n\r\nBoth people must be online. If connection takes a while, allow WinPopup through your firewall, check internet access, then use Messages > Reconnect.\r\n\r\n"+a.notice);
@@ -536,12 +904,15 @@ void NetworkDialog(App& a){
 HMENU MessagesMenu(App& a){
     HMENU menu=CreatePopupMenu(),contacts=CreatePopupMenu();
     AppendMenuW(menu,MF_STRING,IdSend,L"&Send Message...\tCtrl+N");
+    AppendMenuW(menu,MF_STRING,IdSendFile,L"Send &File...");
     AppendMenuW(menu,MF_STRING|(a.currentMessage<0?MF_GRAYED:0),IdDelete,L"&Delete Message\tDel");
     AppendMenuW(menu,MF_STRING|(a.currentMessage<=0?MF_GRAYED:0),IdPrevious,L"&Previous Message\tAlt+Left");
     AppendMenuW(menu,MF_STRING|(a.currentMessage<0||a.currentMessage+1>=(int)a.inbox.size()?MF_GRAYED:0),IdNext,L"&Next Message\tAlt+Right");
     AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,IdSent,L"Sent &Messages...");
+    AppendMenuW(menu,MF_STRING,IdTransfers,L"File &Transfers...");
     AppendMenuW(contacts,MF_STRING,IdAdd,L"&Add Contact...");AppendMenuW(contacts,MF_STRING,IdContacts,L"&View Contacts...");
     AppendMenuW(contacts,MF_STRING,IdRemove,L"&Remove Contact...");AppendMenuW(contacts,MF_SEPARATOR,0,nullptr);
+    AppendMenuW(contacts,MF_STRING,IdInvitation,L"My Invitation (&QR Code)...");
     AppendMenuW(contacts,MF_STRING,IdCopy,L"Copy My &Invitation\tCtrl+I");AppendMenuW(menu,MF_POPUP,(UINT_PTR)contacts,L"&Contacts");
     AppendMenuW(menu,MF_STRING,IdRename,L"Pro&file...");AppendMenuW(menu,MF_STRING,IdNetwork,L"Net&work...");
     AppendMenuW(menu,MF_STRING,IdReconnect,L"&Reconnect");AppendMenuW(menu,MF_STRING|(a.popupOnMessage?MF_CHECKED:0),IdPopup,L"Pop &Up on New Message");
@@ -665,22 +1036,25 @@ LRESULT CALLBACK MainProc(HWND w,UINT m,WPARAM wp,LPARAM lp){
     case WM_KEYDOWN:if(wp==VK_F10){OpenMenu(*a,false);return 0;}break;
     case WM_COMMAND:
         switch(LOWORD(wp)){
+        case IdInvitation:OpenInvitation(*a);break;case IdSendFile:SendFileDialog(*a);break;case IdTransfers:OpenTransfers(*a,true);break;
         case IdSend:OpenCompose(*a);break;case IdDelete:DeleteCurrent(*a);break;case IdPrevious:Navigate(*a,-1);break;case IdNext:Navigate(*a,1);break;
         case IdAdd:AddContact(*a);break;case IdCopy:CopyInvitation(*a);break;case IdContacts:ContactsDialog(*a,false);break;case IdRemove:ContactsDialog(*a,true);break;
         case IdRename:Rename(*a);break;case IdNetwork:NetworkDialog(*a);break;case IdReconnect:a->core.RetryBootstrap();break;case IdSent:SentDialog(*a);break;
         case IdPopup:a->popupOnMessage=!a->popupOnMessage;break;case IdMinimise:ShowWindow(w,SW_MINIMIZE);break;case IdShow:ShowApp(*a);break;
-        case IdAbout:About(*a);break;case IdQuit:DestroyWindow(w);break;}return 0;
+        case IdAbout:About(*a);break;case IdQuit:PostMessageW(w,WM_CLOSE,0,0);break;}return 0;
     case WM_TIMER:if(wp==SmokeTimer){DestroyWindow(w);return 0;}Poll(*a);return 0;
     case TrayMessage:
-        if(lp==WM_LBUTTONUP||lp==WM_LBUTTONDBLCLK||lp==NIN_BALLOONUSERCLICK)ShowApp(*a);
+        if(lp==WM_LBUTTONUP||lp==WM_LBUTTONDBLCLK||lp==NIN_BALLOONUSERCLICK){ShowApp(*a);if(lp==NIN_BALLOONUSERCLICK&&a->fileNotification){OpenTransfers(*a,true);a->fileNotification=false;}}
         else if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU){
             HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,IdShow,L"Open WinPopup");AppendMenuW(menu,MF_STRING,IdSend,L"Send Message...");
+            AppendMenuW(menu,MF_STRING,IdTransfers,L"File Transfers...");
             AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,IdQuit,L"Exit");POINT p;GetCursorPos(&p);SetForegroundWindow(w);
             TrackPopupMenu(menu,TPM_RIGHTBUTTON,p.x,p.y,0,w,nullptr);DestroyMenu(menu);PostMessageW(w,WM_NULL,0,0);
         }return 0;
-    case WM_CLOSE:DestroyWindow(w);return 0;
+    case WM_CLOSE:if(ConfirmExit(*a))DestroyWindow(w);return 0;
     case WM_DESTROY:{
         KillTimer(w,PollTimer);if(a->composeWindow)DestroyWindow(a->composeWindow);
+        if(a->invitationWindow)DestroyWindow(a->invitationWindow);if(a->transfersWindow)DestroyWindow(a->transfersWindow);
         NOTIFYICONDATAW d{};d.cbSize=sizeof(d);d.hWnd=w;d.uID=1;if(a->tray)Shell_NotifyIconW(NIM_DELETE,&d);
         a->core.Stop();for(const auto& e:a->core.Poll())if(e.type==popup::EventType::Error)Alert(nullptr,L"Profile Save Error",Wide(e.text));
         ForgetWindow(w);a->window=nullptr;PostQuitMessage(0);return 0;
@@ -717,11 +1091,14 @@ bool StartProfile(App& a){
     }
 }
 void RegisterClasses(){
+    INITCOMMONCONTROLSEX transferControls{sizeof(transferControls),ICC_LISTVIEW_CLASSES|ICC_PROGRESS_CLASS};InitCommonControlsEx(&transferControls);
     HICON icon=(HICON)LoadImageW(instance,MAKEINTRESOURCEW(101),IMAGE_ICON,0,0,LR_DEFAULTSIZE|LR_SHARED);
     WNDCLASSEXW wc{sizeof(wc)};wc.hInstance=instance;wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=icon;wc.hIconSm=icon;wc.style=CS_DBLCLKS;
     wc.lpfnWndProc=FormProc;wc.lpszClassName=L"WinPopupForm";RegisterClassExW(&wc);
     wc.lpfnWndProc=ComposeProc;wc.lpszClassName=L"WinPopupCompose";RegisterClassExW(&wc);
     wc.lpfnWndProc=MainProc;wc.lpszClassName=L"WinPopupP2P";RegisterClassExW(&wc);
+    wc.lpfnWndProc=InvitationProc;wc.lpszClassName=L"WinPopupInvitation";RegisterClassExW(&wc);
+    wc.lpfnWndProc=TransfersProc;wc.lpszClassName=L"WinPopupTransfers";RegisterClassExW(&wc);
 }
 }
 int WINAPI wWinMain(HINSTANCE application,HINSTANCE,PWSTR,int show){
@@ -744,14 +1121,19 @@ int WINAPI wWinMain(HINSTANCE application,HINSTANCE,PWSTR,int show){
     HACCEL accel=CreateAcceleratorTableW(bindings,(int)std::size(bindings));MSG message{};
     while(GetMessageW(&message,nullptr,0,0)>0){
         bool compose=app.composeWindow&&(message.hwnd==app.composeWindow||IsChild(app.composeWindow,message.hwnd));
-        HWND target=compose?app.composeWindow:w;
+        bool invitation=app.invitationWindow&&(message.hwnd==app.invitationWindow||IsChild(app.invitationWindow,message.hwnd));
+        bool transfers=app.transfersWindow&&(message.hwnd==app.transfersWindow||IsChild(app.transfersWindow,message.hwnd));
+        HWND target=compose?app.composeWindow:invitation?app.invitationWindow:transfers?app.transfersWindow:w;
         if(message.message==WM_SYSKEYDOWN){
             if(message.wParam==VK_SPACE){SystemMenu(target);continue;}
             if(message.wParam==VK_F4){PostMessageW(target,WM_CLOSE,0,0);continue;}
-            if(!compose&&(message.wParam=='M'||message.wParam=='H')){OpenMenu(app,message.wParam=='H');continue;}
+            if(target==w&&(message.wParam=='M'||message.wParam=='H')){OpenMenu(app,message.wParam=='H');continue;}
         }
-        if(!compose&&message.message==WM_KEYDOWN&&message.wParam==VK_F10){OpenMenu(app,false);continue;}
-        if(compose){
+        if(target==w&&message.message==WM_KEYDOWN&&message.wParam==VK_F10){OpenMenu(app,false);continue;}
+        if(invitation||transfers){
+            if(message.message==WM_KEYDOWN&&message.wParam==VK_ESCAPE){PostMessageW(target,WM_CLOSE,0,0);continue;}
+            if(!IsDialogMessageW(target,&message)){TranslateMessage(&message);DispatchMessageW(&message);}
+        }else if(compose){
             if(message.message==WM_KEYDOWN&&message.wParam==VK_ESCAPE){DestroyWindow(app.composeWindow);continue;}
             if(message.message==WM_KEYDOWN&&message.wParam==VK_RETURN&&(GetKeyState(VK_CONTROL)<0||GetFocus()!=app.messageEdit)){
                 if(GetFocus()==app.sendCancel)DestroyWindow(app.composeWindow);else SendFromComposer(app);continue;

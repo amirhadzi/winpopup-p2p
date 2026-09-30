@@ -1,4 +1,4 @@
-WINPOPUP P2P — 0.2.0 CLASSIC / WINDOWS X64
+WINPOPUP P2P — 0.3.0 CLASSIC / WINDOWS X64
 
 1. Extract this entire folder to a writable location.
 2. Open WinPopup.exe. Choose a display name and profile password.
@@ -7,11 +7,24 @@ WINPOPUP P2P — 0.2.0 CLASSIC / WINDOWS X64
 5. Approve their request. Once connected, click the envelope toolbar button,
    choose the contact, type a message, and press Ctrl+Enter or OK.
 
+QR INVITATION: Messages > Contacts > My Invitation (QR Code) shows both
+QR and ID. Copy QR pastes the image into another app; Copy ID copies the
+same public Tox invitation as text. Generation is entirely local.
+
+FILES AND IMAGES: Messages > Send File lets you pick a contact and file.
+Messages > File Transfers shows offers and progress. Accept an incoming
+file and choose a new save name, or Decline. Cancel stops a transfer.
+Images arrive unchanged. Both people need to stay online. Max 2 GiB/file,
+8 active transfers. Existing files are not overwritten. Transfers do not
+resume after interruption. Saved files are ordinary, unencrypted files;
+no incoming file is accepted or opened automatically.
+Both WinPopup users need version 0.3.0 or newer for file sharing.
+
 The main window shows one message at a time. Previous/Next browse messages;
 the delete button removes the displayed message from this session.
 
 No account, installer, .NET, or server of your own is needed. This version
-supports one-to-one text messages using Tox. Public discovery nodes and,
+supports one-to-one text, images and files using Tox. Public discovery nodes and,
 when needed, encrypted relays help you connect over the internet.
 
 Both users must be online. Delivered means the other app received it,
@@ -33,7 +46,7 @@ Only one running copy can open a particular profile.
 
 UPGRADING: Close the old app and replace only WinPopup.exe in its folder.
 Keep the existing data folder and the same password. Your identity and
-contacts carry over from version 0.1.0.
+contacts carry over from versions 0.1.0 and 0.2.0.
 
 This is an unsigned development build. See README.md for details,
 limitations, privacy, and source/build information.
