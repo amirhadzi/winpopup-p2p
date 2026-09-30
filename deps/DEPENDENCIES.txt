@@ -1,0 +1,96 @@
+WinPopup P2P native dependencies
+================================
+
+Built for Windows x64 using MSVC 19.44 and the static release C runtime (/MT).
+No audio/video codecs are compiled into Tox. The installed static libraries
+produce an executable requiring Windows system DLLs only.
+
+Versions and origins
+-------------------
+c-toxcore 0.2.23 (GPL-3.0-or-later)
+https://github.com/TokTok/c-toxcore/releases/tag/v0.2.23
+Archive: c-toxcore-v0.2.23.tar.gz
+SHA256: 15cdd006ed7793dfc657e340ef9f218f6637d2fe5b130704d39b961389bb6cd6
+This official release archive contains the corresponding source, including CMP.
+Its hash matches GitHub's release asset digest. No Tox source was modified.
+
+CMP (MIT)
+The exact revision bundled by the c-toxcore 0.2.23 full source release is used.
+https://github.com/TokTok/cmp
+
+libsodium 1.0.22 (ISC)
+https://download.libsodium.org/libsodium/releases/
+Source archive: libsodium-1.0.22.tar.gz
+SHA256: adbdd8f16149e81ac6078a03aca6fc03b592b89ef7b5ed83841c086191be3349
+Official MSVC binary archive: libsodium-1.0.22-msvc.zip
+SHA256: 3e03a726fac4bc09cb61d8f29d658ef7a5eca0811de59082130414f7ca2e4279
+The x64/Release/v143/static library is used. The source archive contains
+builds/msvc/vs2022/libsodium.sln to rebuild it with Visual Studio 2022;
+select x64 / StaticRelease. Both archives were fetched using official HTTPS.
+
+pthreads4w 3.0.0 (Apache-2.0)
+https://sourceforge.net/projects/pthreads4w/
+Archive: pthreads4w-code-v3.0.0.zip
+SHA512: 49e541b66c26ddaf812edb07b61d0553e2a5816ab002edc53a38a897db8ada6d0a096c98a9af73a8f40c94283df53094f76b429b09ac49862465d8697ed20013
+Hash independently matches Microsoft's vcpkg port. Source was built with
+nmake VC-static in an MSVC x64 environment. No source modifications.
+
+Build
+-----
+Install Visual Studio 2022 with Desktop development with C++ and its CMake
+tools, then run in PowerShell:
+
+    .\build-dependencies.ps1
+
+The script imports the x64 compiler environment, verifies archives, extracts
+them into this dependency directory and builds Tox + pthreads4w. It uses
+the official static libsodium binary. Missing archives are downloaded.
+Build output goes into build-nmake; installed headers, libraries and license
+texts go into install. The script supports -VisualStudioPath for custom installs.
+
+NMake Makefiles are used to avoid MSBuild's SDK discovery on restricted hosts.
+The top-level CMakeLists.txt uses the exact production source list in the
+upstream Tox CMake file and adds toxencryptsave. Source files remain unchanged.
+
+Consumer link settings
+----------------------
+Include directory: install/include
+Libraries: install/lib/toxcore.lib, libsodium.lib, pthreadVC3.lib
+Windows libraries: ws2_32, iphlpapi, advapi32, bcrypt
+Consumer C runtime: /MT
+Consumer define: SODIUM_STATIC
+If including pthread.h directly, also define __PTW32_STATIC_LIB.
+
+Verification
+------------
+dependency-smoke.c was built and executed successfully against these libraries:
+  Tox 0.2.23; libsodium 1.0.22
+  toxencryptsave encrypt/decrypt round trip
+  Tox creation, iteration and teardown (UDP disabled for this unit smoke test)
+The application-level integration tests separately verify peer messaging.
+
+Suggested source distribution contents
+--------------------------------------
+Include CMakeLists.txt, build-dependencies.ps1, DEPENDENCIES.txt,
+dependency-smoke.c, install/, and these complete source archives:
+  c-toxcore-v0.2.23.tar.gz
+  libsodium-1.0.22.tar.gz
+  pthreads4w-code-v3.0.0.zip
+
+The large libsodium MSVC archive may be omitted from the source package;
+the dependency build script downloads and verifies it when rebuilding.
+The bundled install/ static libraries let users compile the app immediately.
+
+Bootstrap nodes
+---------------
+bootstrap-nodes.json is a snapshot from https://nodes.tox.chat/json fetched on
+30 September 2026. The application pins selected node DHT public keys; it
+does not silently fetch untrusted replacement node keys on startup.
+Public bootstrap peers allow first contact with the Tox DHT. TCP relay peers
+help when a direct UDP connection cannot be established. Neither component
+provides offline message storage. Endpoints still need to be online together.
+
+No infrastructure to operate is possible for users of the public Tox network.
+Zero infrastructure dependency across arbitrary NATs is not a truthful claim:
+discovery needs reachable peers and some network combinations require relays.
+The app can support direct connections where the network permits them.

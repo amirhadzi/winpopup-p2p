@@ -1,0 +1,38 @@
+WinPopup P2P 0.2.0
+=================
+
+This independent application is distributed under GPL-3.0-or-later.
+See LICENSE.txt for the complete GPL version 3 license. The complete
+corresponding source is supplied in WinPopupP2P-0.2.0-source.zip alongside
+the binary distribution. There is no warranty; see the license.
+
+The application statically links the following upstream software:
+
+c-toxcore 0.2.23, including toxencryptsave
+  License: GPL-3.0-or-later
+  Source: https://github.com/TokTok/c-toxcore/releases/tag/v0.2.23
+  License text: licenses/toxcore-GPL-3.0.txt
+
+CMP, exact source revision bundled in the c-toxcore 0.2.23 source release
+  License: MIT
+  Source: https://github.com/TokTok/cmp
+  License text and copyright: licenses/cmp-MIT.txt
+
+libsodium 1.0.22
+  License: ISC
+  Source: https://download.libsodium.org/libsodium/releases/
+  License text and copyright: licenses/libsodium-ISC.txt
+
+pthreads4w 3.0.0
+  License: Apache-2.0
+  Source: https://sourceforge.net/projects/pthreads4w/
+  License text: licenses/pthreads4w-Apache-2.0.txt
+  Required notices: licenses/pthreads4w-NOTICE.txt
+
+Upstream source inputs are unmodified. Dependency compilation and the
+WinPopup application are described in the matching source package.
+The executable includes Microsoft's statically linked C/C++ runtime as
+permitted by the Visual Studio redistributable terms. Windows system
+libraries are supplied by Windows and are not redistributed in this ZIP.
+
+WinPopup P2P is not affiliated with or endorsed by Microsoft or the Tox project.

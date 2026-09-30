@@ -1,0 +1,39 @@
+WINPOPUP P2P — 0.2.0 CLASSIC / WINDOWS X64
+
+1. Extract this entire folder to a writable location.
+2. Open WinPopup.exe. Choose a display name and profile password.
+3. Choose Messages > Contacts > Copy My Invitation and share it with a friend.
+4. Your friend chooses Messages > Contacts > Add Contact and pastes it.
+5. Approve their request. Once connected, click the envelope toolbar button,
+   choose the contact, type a message, and press Ctrl+Enter or OK.
+
+The main window shows one message at a time. Previous/Next browse messages;
+the delete button removes the displayed message from this session.
+
+No account, installer, .NET, or server of your own is needed. This version
+supports one-to-one text messages using Tox. Public discovery nodes and,
+when needed, encrypted relays help you connect over the internet.
+
+Both users must be online. Delivered means the other app received it,
+not that the person read it. History clears when you quit.
+
+Minimise to keep receiving in the tray. Closing the window quits.
+Messages > Pop Up on New Message enables the classic popup behaviour.
+Messages > Sent Messages shows outgoing delivery status.
+The original Workgroup control is disabled: this version sends to one
+Tox contact at a time, not Windows workgroups or Tox groups.
+
+Your encrypted identity and contacts live in data/profile.tox beside
+the executable. Move the entire folder for portability. Close the app
+before backing up the folder. Remember the password: there is no reset.
+
+If Windows blocks creating the data folder, move the extracted app to
+a writable location, such as Downloads. Keep Windows protections enabled.
+Only one running copy can open a particular profile.
+
+UPGRADING: Close the old app and replace only WinPopup.exe in its folder.
+Keep the existing data folder and the same password. Your identity and
+contacts carry over from version 0.1.0.
+
+This is an unsigned development build. See README.md for details,
+limitations, privacy, and source/build information.

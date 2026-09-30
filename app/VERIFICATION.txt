@@ -1,0 +1,61 @@
+WinPopup P2P 0.2.0 — verification record
+Date: 30 September 2026
+
+BUILD
+- Native Windows x64 Release executable, MSVC 2022, static C/C++ runtime.
+- PE machine: 8664 (x64), Windows GUI subsystem.
+- ASLR, high-entropy addresses, NX and Control Flow Guard enabled.
+- Imports only Windows system libraries; no bundled runtime or external DLLs.
+- Tox 0.2.23 / libsodium 1.0.22 / pthreads4w 3.0.0.
+
+CORE INTEGRATION: 36 CHECKS PASSED
+- Separate encrypted profiles and unique valid Tox identities.
+- Real Tox friend request across local UDP sockets; no automatic acceptance.
+- Direct peer connection following explicit acceptance.
+- Bidirectional text, UTF-8 messages and matching delivery acknowledgements.
+- Display-name propagation and persistence.
+- Oversized/offline sends produce errors without false delivery.
+- Corrupt invitation checksums and unrelated URLs rejected.
+- Malformed incoming UTF-8 safely replaced for display.
+- Standard toxEsave encrypted profile format.
+- Wrong passwords and corrupt profiles do not overwrite existing identity.
+- Simultaneous opening of the same profile is rejected.
+- Identity, contact additions and removals survive restart.
+
+NETWORK
+- A temporary test identity connected to the public Tox network over UDP
+  from the available Windows host.
+- End-to-end messaging tests used two local identities on loopback.
+- Connectivity between two independent internet connections, restrictive
+  NATs, and relay-only networks has not been verified in this environment.
+
+INTERFACE
+- Native UI startup/shutdown smoke test exits successfully.
+- 36 UI behavior checks passed using hidden production windows: inbox
+  navigation/deletion/limits; peer-specific and identity-checked receipts;
+  failed and delayed sends; draft retention; recipient selection;
+  typed recipient preservation during refresh; duplicate-name rejection.
+- 12 GDI fixtures cover the classic received-message and Send Message
+  windows, their reference arrangement, and onboarding at 96/120/144 DPI.
+- Native onboarding controls passed text, size, font and password-masking
+  assertions. Compose checks verify text, recipient and disabled Workgroup.
+- The 96 DPI layout follows the supplied classic reference dimensions:
+  main window 350 x 284, Send Message 308 x 298 logical pixels.
+- Desktop compositor capture was unavailable; offscreen fixtures are
+  test renders, not screenshots of a live conversation. Native offscreen
+  rendering omits some non-client details, including edit scrollbars.
+- Custom icon/toolbar artwork recreates the classic style. This is an
+  independent implementation, not an original Microsoft executable.
+
+SOURCE REBUILD
+- Fresh dependency extraction and compilation passed using all four
+  bundled pinned archives, without downloading additional dependency inputs.
+- Rebuilt libraries passed encryption and Tox lifecycle smoke tests.
+- Native dependencies and core/profile formats are unchanged from 0.1.0.
+- The classic application builds with MSVC x64 and its included libraries.
+
+LIMITATIONS
+This is an unsigned development build. No independent security
+audit, external-client compatibility test, or two-machine internet test
+has been performed. It implements one-to-one text messages, not voice,
+video, file transfer, group chat or offline store-and-forward messaging.
