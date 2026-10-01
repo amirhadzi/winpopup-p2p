@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(WinPopupP2P VERSION 0.3.0 LANGUAGES CXX RC)
+project(WinPopupP2P VERSION 0.3.1 LANGUAGES CXX RC)
 if(NOT WIN32 OR NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Build with MSVC for Windows x64")
 endif()
@@ -11,6 +11,11 @@ add_library(popup_core STATIC src/core.cpp)
 target_include_directories(popup_core PUBLIC src "${POPUP_DEPS}/include")
 target_compile_definitions(popup_core PUBLIC UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 SODIUM_STATIC __PTW32_STATIC_LIB)
 target_compile_options(popup_core PUBLIC /utf-8 /W4 /permissive- /guard:cf)
+# MSVC requires deterministic mode for /pathmap to affect __FILE__ strings.
+target_compile_options(popup_core PUBLIC /experimental:deterministic
+  "/pathmap:${CMAKE_CURRENT_SOURCE_DIR}=app"
+  "/pathmap:${CMAKE_CURRENT_BINARY_DIR}=build"
+  "/pathmap:${POPUP_DEPS}=deps/install")
 target_link_libraries(popup_core PUBLIC
   "${POPUP_DEPS}/lib/toxcore.lib"
   "${POPUP_DEPS}/lib/libsodium.lib"
@@ -21,7 +26,13 @@ target_link_libraries(popup_qr PUBLIC popup_core)
 add_executable(WinPopup WIN32 src/main.cpp resources/app.rc)
 target_include_directories(WinPopup PRIVATE resources)
 target_link_libraries(WinPopup PRIVATE popup_core popup_qr comctl32 comdlg32 shell32 uxtheme dwmapi msimg32)
-target_link_options(WinPopup PRIVATE /MANIFEST:NO /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf)
+target_link_options(WinPopup PRIVATE /MANIFEST:NO /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA /guard:cf /PDBALTPATH:WinPopup.pdb)
+add_custom_command(TARGET WinPopup POST_BUILD
+  COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/check-build-paths.ps1"
+    -Binary "$<TARGET_FILE:WinPopup>" -SourceRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+    -BuildRoot "${CMAKE_CURRENT_BINARY_DIR}" -DependenciesRoot "${POPUP_DEPS}"
+  VERBATIM)
 add_executable(core_tests tests/core_tests.cpp)
 target_link_libraries(core_tests PRIVATE popup_core)
 add_executable(file_transfer_tests tests/file_transfer_tests.cpp)
@@ -44,6 +55,8 @@ add_test(NAME file_transfer_integration COMMAND file_transfer_tests)
 add_test(NAME legacy_peer_integration COMMAND legacy_peer_tests)
 add_test(NAME ui_behavior COMMAND ui_behavior_tests)
 add_test(NAME invite_qr COMMAND qr_tests)
+add_test(NAME build_path_scanner COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+  "${CMAKE_CURRENT_SOURCE_DIR}/tests/check-build-paths.ps1" -SelfTest)
 set_tests_properties(core_integration PROPERTIES TIMEOUT 240)
 set_tests_properties(file_transfer_integration PROPERTIES TIMEOUT 240)
 set_tests_properties(legacy_peer_integration PROPERTIES TIMEOUT 150)

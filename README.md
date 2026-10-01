@@ -1,16 +1,20 @@
 # WinPopup P2P
 
-A small, portable Windows x64 messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.3.0 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
+A small, portable Windows x64 messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.3.1 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
 
 ## Download
 
-[Download the portable Windows x64 release](https://github.com/amirhadzi/winpopup-p2p/releases/tag/v0.3.0). Extract the ZIP and run `WinPopup.exe`. The release also includes a standalone executable, a complete offline source package, and SHA-256 checksums.
+[Download the portable Windows x64 release](https://github.com/amirhadzi/winpopup-p2p/releases/tag/v0.3.1). Extract the ZIP and run `WinPopup.exe`. The release also includes a standalone executable, a complete offline source package, and SHA-256 checksums.
 
 ![Classic interface preview with illustrative messages](docs/classic-preview.png)
 
 This is a render of the production interface with test messages, not a live conversation.
 
-## Upgrading from 0.1.0 or 0.2.0
+## Build-path privacy fix in 0.3.1
+
+This release removes private build-machine paths from the executable by remapping compiler source paths and rebuilding the native dependencies. Every app build scans the executable for user-profile and build-root paths and fails if one is found. Profiles, contacts and file sharing remain compatible with 0.3.0. Previously distributed executables are not changed by installing this update.
+
+## Upgrading from 0.1.0, 0.2.0 or 0.3.0
 
 Close the old app, then replace `WinPopup.exe` in your existing portable folder with this version. Keep your `data` folder and use the same password. Your encrypted identity and contacts remain compatible.
 
@@ -75,7 +79,7 @@ If Windows or folder permissions prevent creating the portable `data` folder, mo
 
 ## Build and test
 
-See [BUILDING.md](app/BUILDING.md). To build this repository, run `deps/build-dependencies.ps1`, then `app/build.ps1 -Test` in PowerShell with Visual Studio 2022 C++ tools installed. The dependency script downloads and verifies the pinned upstream inputs. The release source ZIP also includes those inputs and static libraries for offline builds. It includes the application source, pinned third-party source inputs, build scripts, and license notices. `core_tests` exercises real Tox instances, contact approval, Unicode messages, delivery receipts, identity persistence, invalid input, and encrypted-profile recovery behavior.
+See [BUILDING.md](app/BUILDING.md). To build this repository, run `deps/build-dependencies.ps1`, then `app/build.ps1 -Test` in PowerShell with Visual Studio 2022 C++ tools installed. The dependency script downloads and verifies the pinned upstream inputs. The release source ZIP includes those inputs for offline builds, alongside the application source, build scripts and license notices. Locally compiled static libraries are excluded to avoid distributing build-machine metadata. `core_tests` exercises real Tox instances, contact approval, Unicode messages, delivery receipts, identity persistence, invalid input, and encrypted-profile recovery behavior.
 
 ## License and upstream projects
 

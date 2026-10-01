@@ -29,6 +29,10 @@ The small MIT-licensed Nayuki QR encoder is vendored under `app/third_party/qrco
 
 The result is `app\build\WinPopup.exe`. It needs only Windows system DLLs. To distribute, include the license notices and matching source package.
 
+Application and Tox builds use MSVC `/experimental:deterministic` with `/pathmap` to replace build-machine paths in `__FILE__` and compiler output with relative paths. The executable uses a filename-only PDB reference. The post-link check in `tests/check-build-paths.ps1` rejects user-profile paths and the supplied source/build/dependency roots in narrow or UTF-16 strings; it also runs as a scanner self-test under CTest. Rebuild dependencies when upgrading from 0.3.0: linking an old `toxcore.lib` reintroduces the leak and fails the check.
+
+Release source packages omit locally compiled static libraries because intermediate compiler/archive metadata can still contain local paths. The pinned archives and build scripts are included for an offline rebuild; run the dependency build before the application build.
+
 If you place the compiled dependencies somewhere else:
 
 ```powershell

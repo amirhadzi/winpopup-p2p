@@ -1,8 +1,12 @@
 # WinPopup P2P
 
-A small, portable Windows x64 messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.3.0 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
+A small, portable Windows x64 messenger that recreates the classic WinPopup window and separate Send Message dialog, using the real Tox protocol. Version 0.3.1 uses the compact grey interface, blue title bars, bevelled buttons, bitmap-style type, four-button toolbar and message counters of the supplied classic reference. Native C++ / Win32 interface. No account, subscription, web service, installer, or server of your own.
 
-## Upgrading from 0.1.0 or 0.2.0
+## Build-path privacy fix in 0.3.1
+
+This release removes private build-machine paths from the executable by remapping compiler source paths and rebuilding the native dependencies. Every app build scans the executable for user-profile and build-root paths and fails if one is found. Profiles, contacts and file sharing remain compatible with 0.3.0. Previously distributed executables are not changed by installing this update.
+
+## Upgrading from 0.1.0, 0.2.0 or 0.3.0
 
 Close the old app, then replace `WinPopup.exe` in your existing portable folder with this version. Keep your `data` folder and use the same password. Your encrypted identity and contacts remain compatible.
 

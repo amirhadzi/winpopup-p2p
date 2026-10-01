@@ -1,5 +1,20 @@
-WinPopup P2P 0.3.0 — verification record
-Date: 30 September 2026
+WinPopup P2P 0.3.1 — verification record
+Date: 1 October 2026
+
+BUILD-PATH PRIVACY FIX
+- The prior 0.3.0 executable contained 23 private build-path strings from
+  Tox diagnostics. A clean dependency/application rebuild remaps those
+  paths to relative deps/ and app/ paths at compilation, preserving useful
+  diagnostics. No binary string patching is used.
+- The new executable has no builder username in narrow or UTF-16 strings,
+  and passes the mandatory user-profile/source/build-root scan.
+- The same check rejects the actual old 0.3.0 release binary.
+- 32 scanner regression checks pass, including narrow/wide encodings,
+  both byte alignments, separator variants, and a custom CI build root.
+- Locally built static libraries are omitted from the source ZIP because
+  intermediate compiler/archive metadata can retain build directories.
+- All six suites pass: the existing 173 functional checks plus 32 scanner
+  checks. Previously distributed files are unaffected by this update.
 
 BUILD
 - Native Windows x64 Release executable, MSVC 2022, static C/C++ runtime.
@@ -72,7 +87,7 @@ INTERFACE AND QR
   omitted by offscreen rendering. Artwork is an independent recreation.
 
 COMPATIBILITY AND SOURCE
-- Identity/profile format remains compatible with 0.1.0 and 0.2.0.
+- Identity/profile format remains compatible with 0.1.0, 0.2.0 and 0.3.0.
 - File sharing requires WinPopup 0.3 or later at both ends. Text remains
   compatible with ordinary Tox clients.
 - The source package includes application/tests, QR sources, pinned native

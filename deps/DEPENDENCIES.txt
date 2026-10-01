@@ -4,6 +4,10 @@ WinPopup P2P native dependencies
 Built for Windows x64 using MSVC 19.44 and the static release C runtime (/MT).
 No audio/video codecs are compiled into Tox. The installed static libraries
 produce an executable requiring Windows system DLLs only.
+Tox is compiled with MSVC deterministic path remapping so runtime diagnostic
+strings use relative deps/ paths instead of the builder's private directories.
+Release source packages omit locally compiled libraries, which can still have
+build paths in intermediate archive metadata. Rebuild from the pinned inputs.
 
 Versions and origins
 -------------------

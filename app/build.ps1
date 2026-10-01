@@ -26,6 +26,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Dependencies 'lib\toxcore.lib'))) {
 if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed.' }
 & $cmakeExe --build $BuildDirectory --config Release
 if ($LASTEXITCODE -ne 0) { throw 'Compilation failed.' }
+& (Join-Path $PSScriptRoot 'tests\check-build-paths.ps1') -Binary (Join-Path $BuildDirectory 'WinPopup.exe') -SourceRoot $PSScriptRoot -BuildRoot $BuildDirectory -DependenciesRoot $Dependencies
 if ($Test) {
     $ctestExe = Join-Path (Split-Path $cmakeExe) 'ctest.exe'
     & $ctestExe --test-dir $BuildDirectory -C Release --output-on-failure

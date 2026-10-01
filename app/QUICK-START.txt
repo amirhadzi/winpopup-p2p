@@ -1,4 +1,4 @@
-WINPOPUP P2P — 0.3.0 CLASSIC / WINDOWS X64
+WINPOPUP P2P — 0.3.1 CLASSIC / WINDOWS X64
 
 1. Extract this entire folder to a writable location.
 2. Open WinPopup.exe. Choose a display name and profile password.
@@ -46,7 +46,7 @@ Only one running copy can open a particular profile.
 
 UPGRADING: Close the old app and replace only WinPopup.exe in its folder.
 Keep the existing data folder and the same password. Your identity and
-contacts carry over from versions 0.1.0 and 0.2.0.
+contacts carry over from versions 0.1.0, 0.2.0 and 0.3.0.
 
 This is an unsigned development build. See README.md for details,
 limitations, privacy, and source/build information.

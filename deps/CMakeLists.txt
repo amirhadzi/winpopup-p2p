@@ -18,6 +18,9 @@ list(APPEND toxcore_SOURCES "${TOX_SOURCE}/toxencryptsave/toxencryptsave.c")
 add_library(toxcore STATIC ${toxcore_SOURCES})
 target_compile_definitions(toxcore PRIVATE SODIUM_STATIC __PTW32_STATIC_LIB CMP_NO_FLOAT=1 MIN_LOGGER_LEVEL=LOGGER_LEVEL_WARNING _CRT_SECURE_NO_WARNINGS _WINSOCK_DEPRECATED_NO_WARNINGS)
 target_compile_options(toxcore PRIVATE /O2 /Ob2 /Gy /W3 /wd4244 /wd4267 /wd4018 /wd4996)
+target_compile_options(toxcore PRIVATE /experimental:deterministic
+  "/pathmap:${CMAKE_CURRENT_SOURCE_DIR}=deps"
+  "/pathmap:${CMAKE_CURRENT_BINARY_DIR}=deps/build")
 target_include_directories(toxcore PRIVATE "${SODIUM_SOURCE}/include" "${PTHREAD_SOURCE}")
 install(TARGETS toxcore ARCHIVE DESTINATION lib)
 install(FILES
